@@ -1,0 +1,16 @@
+{
+  "name": "agent-service",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/api.js",
+  "scripts": {
+    "api": "node src/api.js",
+    "worker": "node src/worker.js"
+  },
+  "dependencies": {
+    "bullmq": "^5.10.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1"
+  }
+}

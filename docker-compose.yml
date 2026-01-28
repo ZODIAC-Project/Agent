@@ -1,0 +1,21 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  agent-api:
+    build: .
+    env_file: .env
+    command: ["npm", "run", "api"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - redis
+
+  agent-worker:
+    build: .
+    env_file: .env
+    command: ["npm", "run", "worker"]
+    depends_on:
+      - redis

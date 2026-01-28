@@ -1,0 +1,54 @@
+import "dotenv/config";
+import express from "express";
+import crypto from "crypto";
+import { agentQueue, redis } from "./queue.js";
+
+const app = express();
+app.use(express.json());
+
+const AGENT_HASH = "agents";
+
+app.post("/agents", async (req, res) => {
+  const { intervalMs, text } = req.body || {};
+  if (!intervalMs || !text || intervalMs < 1000) {
+    return res.status(400).json({ error: "intervalMs >= 1000 und text erforderlich" });
+  }
+
+  const agentId = crypto.randomUUID();
+  await agentQueue.add(
+    "agent",
+    { agentId, text },
+    {
+      jobId: agentId,
+      repeat: { every: intervalMs }
+    }
+  );
+
+  await redis.hset(AGENT_HASH, agentId, JSON.stringify({ intervalMs, text }));
+  res.status(201).json({ agentId, intervalMs, text });
+});
+
+app.get("/agents", async (_req, res) => {
+  const all = await redis.hgetall(AGENT_HASH);
+  const agents = Object.entries(all).map(([agentId, value]) => ({
+    agentId,
+    ...JSON.parse(value)
+  }));
+  res.json(agents);
+});
+
+app.delete("/agents/:agentId", async (req, res) => {
+  const { agentId } = req.params;
+  const raw = await redis.hget(AGENT_HASH, agentId);
+  if (!raw) return res.status(404).json({ error: "not found" });
+
+  const { intervalMs } = JSON.parse(raw);
+  await agentQueue.removeRepeatable("agent", { every: intervalMs, jobId: agentId });
+  await redis.hdel(AGENT_HASH, agentId);
+  res.json({ ok: true });
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`agent api listening on ${port}`);
+});
