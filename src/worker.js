@@ -10,8 +10,8 @@ const worker = new Worker(
     const { agentId, text } = job.data;
 
     const payload = {
-      agentId,
-      text,
+      message: text,
+      session_id: agentId,
       ts: Date.now()
     };
 
