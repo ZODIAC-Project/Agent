@@ -23,7 +23,8 @@ const worker = new Worker(
 
     const payload = {
       message: text,
-      session_id: agentId
+      session_id: agentId,
+      ts: Date.now()
     };
 
     console.log("job start", new Date().toISOString(), job.id, { agentId, text });
