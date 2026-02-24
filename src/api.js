@@ -9,7 +9,7 @@ app.use(express.json());
 const AGENT_HASH = "agents";
 
 app.post("/agents", async (req, res) => {
-  const { intervalMs, text } = req.body || {};
+  const { intervalMs, text, chatApiBase, chatApiPath } = req.body || {};
   if (!intervalMs || !text || intervalMs < 1000) {
     return res.status(400).json({ error: "intervalMs >= 1000 und text erforderlich" });
   }
@@ -17,15 +17,19 @@ app.post("/agents", async (req, res) => {
   const agentId = crypto.randomUUID();
   await agentQueue.add(
     "agent",
-    { agentId, text },
+    { agentId, text, chatApiBase, chatApiPath },
     {
       jobId: agentId,
       repeat: { every: intervalMs }
     }
   );
 
-  await redis.hset(AGENT_HASH, agentId, JSON.stringify({ intervalMs, text }));
-  res.status(201).json({ agentId, intervalMs, text });
+  await redis.hset(
+    AGENT_HASH,
+    agentId,
+    JSON.stringify({ intervalMs, text, chatApiBase, chatApiPath })
+  );
+  res.status(201).json({ agentId, intervalMs, text, chatApiBase, chatApiPath });
 });
 
 app.get("/agents", async (_req, res) => {
