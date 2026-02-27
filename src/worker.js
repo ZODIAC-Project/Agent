@@ -6,9 +6,10 @@ const mcpClientUrl = process.env.MCP_CLIENT_URL;
 
 const normalizeBase = (value) => (value.endsWith("/") ? value.slice(0, -1) : value);
 const normalizePath = (value) => (value.startsWith("/") ? value : `/${value}`);
+const isAbsoluteUrl = (value) => /^https?:\/\//i.test(value);
 
 const resolveChatUrl = (jobData) => {
-  if (jobData?.chatApiBase) {
+  if (jobData?.chatApiBase && isAbsoluteUrl(jobData.chatApiBase)) {
     const base = normalizeBase(jobData.chatApiBase);
     const path = jobData.chatApiPath ? normalizePath(jobData.chatApiPath) : "";
     return `${base}${path}`;
