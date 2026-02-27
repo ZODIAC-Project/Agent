@@ -8,6 +8,7 @@
     "worker": "node src/worker.js"
   },
   "dependencies": {
+    "@langchain/core": "^0.3.41",
     "bullmq": "^5.10.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

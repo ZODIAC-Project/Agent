@@ -6,6 +6,22 @@ Agent Service (BullMQ + Redis)
 
 Der Agent schickt eine/mehrere Nachricht/Nachrichten in einem fixen Intervall zu dem MCP Client. Gesteuert wird dies Über die OrionUI.
 
+## LangChain 
+
+Der bestehende Redis/BullMQ-Flow bleibt unverändert. Vor dem Senden wird jede Nachricht immer über eine LangChain-Template-Verarbeitung gebaut.
+
+1. Abhängigkeiten installieren:
+
+```bash
+npm install
+```
+
+Die aktuell verwendete Formatvorlage ist (Pass-through, damit das MCP-Tool-Parsing stabil bleibt):
+
+```text
+{text}
+```
+
 ### Image Tagging script:
 If you want to build and push new images to your registry, you can use the following script to build and then tag the images with the digest.
 

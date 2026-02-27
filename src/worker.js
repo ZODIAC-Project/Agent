@@ -1,12 +1,15 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { agentQueue } from "./queue.js";
+import { buildAgentMessage } from "./langchain.js";
 
 const mcpClientUrl = process.env.MCP_CLIENT_URL;
 
 const normalizeBase = (value) => (value.endsWith("/") ? value.slice(0, -1) : value);
 const normalizePath = (value) => (value.startsWith("/") ? value : `/${value}`);
 const isAbsoluteUrl = (value) => /^https?:\/\//i.test(value);
+const preview = (value, size = 80) =>
+  value.length <= size ? value : `${value.slice(0, size)}...`;
 
 const resolveChatUrl = (jobData) => {
   if (jobData?.chatApiBase && isAbsoluteUrl(jobData.chatApiBase)) {
@@ -21,14 +24,19 @@ const worker = new Worker(
   "agent-queue",
   async (job) => {
     const { agentId, text } = job.data;
+    const message = await buildAgentMessage({ agentId, text });
 
     const payload = {
-      message: text,
-      session_id: agentId,
-      ts: Date.now()
+      message,
+      session_id: agentId
     };
 
-    console.log("job start", new Date().toISOString(), job.id, { agentId, text });
+    console.log("job start", new Date().toISOString(), job.id, {
+      agentId,
+      text,
+      messageLength: message.length,
+      messagePreview: preview(message)
+    });
 
     const chatUrl = resolveChatUrl(job.data);
     const res = await fetch(chatUrl, {
