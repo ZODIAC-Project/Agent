@@ -10,6 +10,15 @@ Der Agent schickt eine/mehrere Nachricht/Nachrichten in einem fixen Intervall zu
 
 Der bestehende Redis/BullMQ-Flow bleibt unverändert. Vor dem Senden wird jede Nachricht immer über eine LangChain-Template-Verarbeitung gebaut.
 
+Aktive Features:
+
+- PromptTemplate
+- RunnableSequence
+- StringOutputParser
+- Retry (`withRetry`)
+- Fallback (`withFallbacks`)
+- Invoke-Metadaten + Trace Logging im Worker
+
 1. Abhängigkeiten installieren:
 
 ```bash
@@ -21,6 +30,14 @@ Die aktuell verwendete Formatvorlage ist (Pass-through, damit das MCP-Tool-Parsi
 ```text
 {text}
 ```
+
+LangChain testen:
+
+```bash
+npm run test:langchain
+```
+
+Erwartung: `ok: true` und `actual === expected` im Output.
 
 ### Image Tagging script:
 If you want to build and push new images to your registry, you can use the following script to build and then tag the images with the digest.

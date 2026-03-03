@@ -24,7 +24,7 @@ const worker = new Worker(
   "agent-queue",
   async (job) => {
     const { agentId, text } = job.data;
-    const message = await buildAgentMessage({ agentId, text });
+    const { message, trace } = await buildAgentMessage({ agentId, text });
 
     const payload = {
       message,
@@ -35,7 +35,8 @@ const worker = new Worker(
       agentId,
       text,
       messageLength: message.length,
-      messagePreview: preview(message)
+      messagePreview: preview(message),
+      langchain: trace
     });
 
     const chatUrl = resolveChatUrl(job.data);

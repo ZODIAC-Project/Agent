@@ -5,7 +5,8 @@
   "main": "src/api.js",
   "scripts": {
     "api": "node src/api.js",
-    "worker": "node src/worker.js"
+    "worker": "node src/worker.js",
+    "test:langchain": "node src/langchain-smoke.js"
   },
   "dependencies": {
     "@langchain/core": "^0.3.41",
