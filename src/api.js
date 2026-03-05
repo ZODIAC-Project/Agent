@@ -19,6 +19,7 @@ app.post("/agents", async (req, res) => {
     text,
     chatApiBase,
     chatApiPath,
+    purposes,
     smartMode,
     ragContext,
     toolHints,
@@ -31,6 +32,11 @@ app.post("/agents", async (req, res) => {
 
   const agentId = crypto.randomUUID();
   const normalizedSmartMode = typeof smartMode === "string" ? smartMode : "balanced";
+  const normalizedPurposes = Array.isArray(purposes)
+    ? purposes.map((item) => String(item).trim()).filter(Boolean)
+    : typeof purposes === "string"
+      ? purposes.split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
   const normalizedRagContext = typeof ragContext === "string" ? ragContext : "";
   const normalizedToolHints = Array.isArray(toolHints)
     ? toolHints.map((item) => String(item).trim()).filter(Boolean)
@@ -47,6 +53,7 @@ app.post("/agents", async (req, res) => {
       text,
       chatApiBase,
       chatApiPath,
+      purposes: normalizedPurposes,
       smartMode: normalizedSmartMode,
       ragContext: normalizedRagContext,
       toolHints: normalizedToolHints,
@@ -67,6 +74,7 @@ app.post("/agents", async (req, res) => {
       text,
       chatApiBase,
       chatApiPath,
+      purposes: normalizedPurposes,
       smartMode: normalizedSmartMode,
       ragContext: normalizedRagContext,
       toolHints: normalizedToolHints,
@@ -80,6 +88,7 @@ app.post("/agents", async (req, res) => {
     text,
     chatApiBase,
     chatApiPath,
+    purposes: normalizedPurposes,
     smartMode: normalizedSmartMode,
     ragContext: normalizedRagContext,
     toolHints: normalizedToolHints,

@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
-import { agentQueue, redis } from "./queue.js";
+import { agentQueue } from "./queue.js";
 import { buildAgentMessage } from "./langchain.js";
 
 const mcpClientUrl = process.env.MCP_CLIENT_URL;
@@ -10,28 +10,6 @@ const normalizePath = (value) => (value.startsWith("/") ? value : `/${value}`);
 const isAbsoluteUrl = (value) => /^https?:\/\//i.test(value);
 const preview = (value, size = 80) =>
   value.length <= size ? value : `${value.slice(0, size)}...`;
-const MAX_MEMORY_ITEMS = Number(process.env.AGENT_MEMORY_MAX_ITEMS || "40");
-
-const memoryKey = (agentId) => `agent-memory:${agentId}`;
-
-const loadMemory = async (agentId, memoryWindow = 6) => {
-  const max = Number(memoryWindow) > 0 ? Number(memoryWindow) : 6;
-  const rows = await redis.lrange(memoryKey(agentId), 0, Math.max(max - 1, 0));
-  return rows
-    .map((row) => {
-      try {
-        return JSON.parse(row);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-};
-
-const saveMemory = async (agentId, entry) => {
-  await redis.lpush(memoryKey(agentId), JSON.stringify(entry));
-  await redis.ltrim(memoryKey(agentId), 0, Math.max(MAX_MEMORY_ITEMS - 1, 0));
-};
 
 const resolveChatUrl = (jobData) => {
   if (jobData?.chatApiBase && isAbsoluteUrl(jobData.chatApiBase)) {
@@ -52,9 +30,9 @@ const worker = new Worker(
       ragContext,
       toolHints,
       jsonSchema,
-      memoryWindow
+      memoryWindow,
+      purposes
     } = job.data;
-    const memory = await loadMemory(agentId, memoryWindow);
 
     const { message, trace } = await buildAgentMessage({
       agentId,
@@ -64,12 +42,18 @@ const worker = new Worker(
       toolHints,
       jsonSchema,
       memoryWindow,
-      memory
+      memory: []
     });
 
     const payload = {
       message,
-      session_id: agentId
+      session_id: agentId,
+      purposes: Array.isArray(purposes) ? purposes : [],
+      smart_mode: smartMode || "balanced",
+      rag_context: typeof ragContext === "string" ? ragContext : "",
+      tool_hints: Array.isArray(toolHints) ? toolHints : [],
+      json_schema: typeof jsonSchema === "string" ? jsonSchema : "",
+      memory_window: Number(memoryWindow) > 0 ? Number(memoryWindow) : 6
     };
 
     console.log("job start", new Date().toISOString(), job.id, {
@@ -91,13 +75,6 @@ const worker = new Worker(
       const body = await res.text();
       throw new Error(`MCP client error: ${res.status} ${body}`);
     }
-
-    await saveMemory(agentId, {
-      at: new Date().toISOString(),
-      input: text,
-      output: message,
-      mode: smartMode || "balanced"
-    });
 
     console.log("job ok", new Date().toISOString(), job.id, res.status);
   },
