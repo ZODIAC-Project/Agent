@@ -8,6 +8,15 @@ const app = express();
 app.use(express.json());
 
 const AGENT_HASH = "agents";
+const AGENT_HISTORY_PREFIX = "agent:history:";
+
+const getAgentHistoryKey = (agentId) => `${AGENT_HISTORY_PREFIX}${agentId}`;
+
+const toSafeInt = (value, fallback) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+};
 
 app.get("/langchain/features", (_req, res) => {
   res.json(getLangchainFeatureSet());
@@ -106,6 +115,30 @@ app.get("/agents", async (_req, res) => {
   res.json(agents);
 });
 
+app.get("/agents/:agentId/history", async (req, res) => {
+  const { agentId } = req.params;
+  const rawAgent = await redis.hget(AGENT_HASH, agentId);
+  if (!rawAgent) return res.status(404).json({ error: "not found" });
+
+  const requestedLimit = toSafeInt(req.query.limit, 50);
+  const limit = Math.min(Math.max(requestedLimit, 1), 500);
+
+  const key = getAgentHistoryKey(agentId);
+  const rows = await redis.lrange(key, -limit, -1);
+  const history = rows
+    .map((row) => {
+      try {
+        return JSON.parse(row);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .reverse();
+
+  res.json({ agentId, history });
+});
+
 app.delete("/agents/:agentId", async (req, res) => {
   const { agentId } = req.params;
   const raw = await redis.hget(AGENT_HASH, agentId);
@@ -114,6 +147,7 @@ app.delete("/agents/:agentId", async (req, res) => {
   const { intervalMs } = JSON.parse(raw);
   await agentQueue.removeRepeatable("agent", { every: intervalMs, jobId: agentId });
   await redis.hdel(AGENT_HASH, agentId);
+  await redis.del(getAgentHistoryKey(agentId));
   res.json({ ok: true });
 });
 

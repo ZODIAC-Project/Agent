@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@langchain/core": "^0.3.41",
+    "@langchain/mcp-adapters": "^0.3.4",
     "bullmq": "^5.10.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

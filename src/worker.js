@@ -1,15 +1,41 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
-import { agentQueue } from "./queue.js";
+import { agentQueue, redis } from "./queue.js";
 import { buildAgentMessage } from "./langchain.js";
 
 const mcpClientUrl = process.env.MCP_CLIENT_URL;
+const mcpServerUrl = process.env.MCP_SERVER_URL;
+const AGENT_HISTORY_PREFIX = "agent:history:";
+const AGENT_HISTORY_MAX = Number(process.env.AGENT_HISTORY_MAX || 200);
 
 const normalizeBase = (value) => (value.endsWith("/") ? value.slice(0, -1) : value);
 const normalizePath = (value) => (value.startsWith("/") ? value : `/${value}`);
 const isAbsoluteUrl = (value) => /^https?:\/\//i.test(value);
 const preview = (value, size = 80) =>
   value.length <= size ? value : `${value.slice(0, size)}...`;
+
+const historyKey = (agentId) => `${AGENT_HISTORY_PREFIX}${agentId}`;
+
+const pushAgentHistory = async (agentId, entry) => {
+  if (!agentId) return;
+  const key = historyKey(agentId);
+  await redis.rpush(key, JSON.stringify(entry));
+  await redis.ltrim(key, -AGENT_HISTORY_MAX, -1);
+};
+
+const normalizeResponseText = (rawText) => {
+  const value = String(rawText || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && typeof parsed.response === "string") {
+      return parsed.response;
+    }
+    return value;
+  } catch {
+    return value;
+  }
+};
 
 const resolveChatUrl = (jobData) => {
   if (jobData?.chatApiBase && isAbsoluteUrl(jobData.chatApiBase)) {
@@ -42,7 +68,9 @@ const worker = new Worker(
       toolHints,
       jsonSchema,
       memoryWindow,
-      memory: []
+      memory: [],
+      mcpServerUrl,
+      enableMcpToolCalls: true
     });
 
     const payload = {
@@ -64,19 +92,48 @@ const worker = new Worker(
       langchain: trace
     });
 
+    const startedAt = new Date().toISOString();
     const chatUrl = resolveChatUrl(job.data);
-    const res = await fetch(chatUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    try {
+      const res = await fetch(chatUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const bodyText = await res.text();
 
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`MCP client error: ${res.status} ${body}`);
+      if (!res.ok) {
+        throw new Error(`MCP client error: ${res.status} ${bodyText}`);
+      }
+
+      await pushAgentHistory(agentId, {
+        timestamp: startedAt,
+        jobId: String(job.id || ""),
+        status: "ok",
+        text: String(text || ""),
+        message: preview(message, 400),
+        response: preview(normalizeResponseText(bodyText), 2000),
+        mcpToolCalls: trace?.mcpToolCalls || null
+      });
+
+      console.log("job ok", new Date().toISOString(), job.id, res.status);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      try {
+        await pushAgentHistory(agentId, {
+          timestamp: startedAt,
+          jobId: String(job.id || ""),
+          status: "error",
+          text: String(text || ""),
+          message: preview(message, 400),
+          error: preview(messageText, 2000),
+          mcpToolCalls: trace?.mcpToolCalls || null
+        });
+      } catch (historyError) {
+        console.error("failed to persist agent history", historyError);
+      }
+      throw error;
     }
-
-    console.log("job ok", new Date().toISOString(), job.id, res.status);
   },
   { connection: agentQueue.opts.connection }
 );
