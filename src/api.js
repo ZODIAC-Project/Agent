@@ -9,8 +9,10 @@ app.use(express.json());
 
 const AGENT_HASH = "agents";
 const AGENT_HISTORY_PREFIX = "agent:history:";
+const AGENT_SPAWN_STATE_PREFIX = "agent:spawned:";
 
 const getAgentHistoryKey = (agentId) => `${AGENT_HISTORY_PREFIX}${agentId}`;
+const getAgentSpawnStateKey = (agentId) => `${AGENT_SPAWN_STATE_PREFIX}${agentId}`;
 
 const toSafeInt = (value, fallback) => {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -25,6 +27,7 @@ app.get("/langchain/features", (_req, res) => {
 app.post("/agents", async (req, res) => {
   const {
     intervalMs,
+    runOnce,
     text,
     chatApiBase,
     chatApiPath,
@@ -33,10 +36,15 @@ app.post("/agents", async (req, res) => {
     ragContext,
     toolHints,
     jsonSchema,
-    memoryWindow
+    memoryWindow,
+    handoffTargets,
+    spawnAgents,
+    maxHandoffDepth
   } = req.body || {};
-  if (!intervalMs || !text || intervalMs < 1000) {
-    return res.status(400).json({ error: "intervalMs >= 1000 und text erforderlich" });
+  const normalizedRunOnce = runOnce === true || String(runOnce || "").toLowerCase() === "true";
+  const normalizedIntervalMs = Number(intervalMs);
+  if (!text || (!normalizedRunOnce && (!normalizedIntervalMs || normalizedIntervalMs < 1000))) {
+    return res.status(400).json({ error: "text erforderlich, und entweder runOnce=true oder intervalMs >= 1000" });
   }
 
   const agentId = crypto.randomUUID();
@@ -54,11 +62,57 @@ app.post("/agents", async (req, res) => {
       : [];
   const normalizedJsonSchema = typeof jsonSchema === "string" ? jsonSchema : "";
   const normalizedMemoryWindow = Number(memoryWindow) > 0 ? Number(memoryWindow) : 6;
+  const normalizedHandoffTargets = Array.isArray(handoffTargets)
+    ? handoffTargets.map((item) => String(item).trim()).filter(Boolean)
+    : typeof handoffTargets === "string"
+      ? handoffTargets.split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
+  const normalizedMaxHandoffDepth = Number(maxHandoffDepth) >= 0 ? Number(maxHandoffDepth) : 2;
+  const normalizedSpawnAgents = Array.isArray(spawnAgents)
+    ? spawnAgents
+        .map((item) => {
+          if (!item || typeof item !== "object") return null;
+          const childRunOnce =
+            item.runOnce === true || String(item.runOnce || "").toLowerCase() === "true";
+          const childIntervalMs = Number(item.intervalMs);
+          const childText = typeof item.text === "string" ? item.text : "";
+          if (!childText || (!childRunOnce && (!childIntervalMs || childIntervalMs < 1000))) return null;
+
+          return {
+            intervalMs: childRunOnce ? null : childIntervalMs,
+            runOnce: childRunOnce,
+            text: childText,
+            chatApiBase: typeof item.chatApiBase === "string" ? item.chatApiBase : "",
+            chatApiPath: typeof item.chatApiPath === "string" ? item.chatApiPath : "",
+            purposes: Array.isArray(item.purposes)
+              ? item.purposes.map((entry) => String(entry).trim()).filter(Boolean)
+              : typeof item.purposes === "string"
+                ? item.purposes.split(",").map((entry) => entry.trim()).filter(Boolean)
+                : [],
+            smartMode: typeof item.smartMode === "string" ? item.smartMode : "balanced",
+            ragContext: typeof item.ragContext === "string" ? item.ragContext : "",
+            toolHints: Array.isArray(item.toolHints)
+              ? item.toolHints.map((entry) => String(entry).trim()).filter(Boolean)
+              : typeof item.toolHints === "string"
+                ? item.toolHints.split(",").map((entry) => entry.trim()).filter(Boolean)
+                : [],
+            jsonSchema: typeof item.jsonSchema === "string" ? item.jsonSchema : "",
+            memoryWindow: Number(item.memoryWindow) > 0 ? Number(item.memoryWindow) : 6,
+            handoffTargets: Array.isArray(item.handoffTargets)
+              ? item.handoffTargets.map((entry) => String(entry).trim()).filter(Boolean)
+              : typeof item.handoffTargets === "string"
+                ? item.handoffTargets.split(",").map((entry) => entry.trim()).filter(Boolean)
+                : []
+          };
+        })
+        .filter(Boolean)
+    : [];
 
   await agentQueue.add(
     "agent",
     {
       agentId,
+      runOnce: normalizedRunOnce,
       text,
       chatApiBase,
       chatApiPath,
@@ -67,19 +121,25 @@ app.post("/agents", async (req, res) => {
       ragContext: normalizedRagContext,
       toolHints: normalizedToolHints,
       jsonSchema: normalizedJsonSchema,
-      memoryWindow: normalizedMemoryWindow
+      memoryWindow: normalizedMemoryWindow,
+      handoffTargets: normalizedHandoffTargets,
+      spawnAgents: normalizedSpawnAgents,
+      maxHandoffDepth: normalizedMaxHandoffDepth
     },
-    {
-      jobId: agentId,
-      repeat: { every: intervalMs }
-    }
+    normalizedRunOnce
+      ? { jobId: `once:${agentId}:${Date.now()}` }
+      : {
+          jobId: agentId,
+          repeat: { every: normalizedIntervalMs }
+        }
   );
 
   await redis.hset(
     AGENT_HASH,
     agentId,
     JSON.stringify({
-      intervalMs,
+      intervalMs: normalizedRunOnce ? null : normalizedIntervalMs,
+      runOnce: normalizedRunOnce,
       text,
       chatApiBase,
       chatApiPath,
@@ -88,12 +148,17 @@ app.post("/agents", async (req, res) => {
       ragContext: normalizedRagContext,
       toolHints: normalizedToolHints,
       jsonSchema: normalizedJsonSchema,
-      memoryWindow: normalizedMemoryWindow
+      memoryWindow: normalizedMemoryWindow,
+      handoffTargets: normalizedHandoffTargets,
+      spawnAgents: normalizedSpawnAgents,
+      maxHandoffDepth: normalizedMaxHandoffDepth
     })
   );
+
   res.status(201).json({
     agentId,
-    intervalMs,
+    intervalMs: normalizedRunOnce ? null : normalizedIntervalMs,
+    runOnce: normalizedRunOnce,
     text,
     chatApiBase,
     chatApiPath,
@@ -102,7 +167,10 @@ app.post("/agents", async (req, res) => {
     ragContext: normalizedRagContext,
     toolHints: normalizedToolHints,
     jsonSchema: normalizedJsonSchema,
-    memoryWindow: normalizedMemoryWindow
+    memoryWindow: normalizedMemoryWindow,
+    handoffTargets: normalizedHandoffTargets,
+    spawnAgents: normalizedSpawnAgents,
+    maxHandoffDepth: normalizedMaxHandoffDepth
   });
 });
 
@@ -118,7 +186,6 @@ app.get("/agents", async (_req, res) => {
 app.get("/agents/:agentId/history", async (req, res) => {
   const { agentId } = req.params;
   const rawAgent = await redis.hget(AGENT_HASH, agentId);
-  if (!rawAgent) return res.status(404).json({ error: "not found" });
 
   const requestedLimit = toSafeInt(req.query.limit, 50);
   const limit = Math.min(Math.max(requestedLimit, 1), 500);
@@ -136,6 +203,8 @@ app.get("/agents/:agentId/history", async (req, res) => {
     .filter(Boolean)
     .reverse();
 
+  if (!rawAgent && history.length === 0) return res.status(404).json({ error: "not found" });
+
   res.json({ agentId, history });
 });
 
@@ -144,10 +213,13 @@ app.delete("/agents/:agentId", async (req, res) => {
   const raw = await redis.hget(AGENT_HASH, agentId);
   if (!raw) return res.status(404).json({ error: "not found" });
 
-  const { intervalMs } = JSON.parse(raw);
-  await agentQueue.removeRepeatable("agent", { every: intervalMs, jobId: agentId });
+  const { intervalMs, runOnce } = JSON.parse(raw);
+  if (!runOnce && Number(intervalMs) >= 1000) {
+    await agentQueue.removeRepeatable("agent", { every: Number(intervalMs), jobId: agentId });
+  }
   await redis.hdel(AGENT_HASH, agentId);
   await redis.del(getAgentHistoryKey(agentId));
+  await redis.del(getAgentSpawnStateKey(agentId));
   res.json({ ok: true });
 });
 
