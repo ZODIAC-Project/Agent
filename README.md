@@ -14,12 +14,14 @@ Agent-Messages laufen jetzt durch eine LangChain-Pipeline (Retry/Fallback/Parser
 
 Ein Agent kann weitere Agenten anlegen (`spawnAgents`) und Ergebnisse an andere bestehende Agenten weiterreichen (`handoffTargets`).
 Fuer einmalige Ausfuehrung ohne Intervall kann `runOnce: true` gesetzt werden.
+Mit `noTools: true` wird Tool-Nutzung hart serverseitig gesperrt.
 
 Beispiel fuer `POST /agents`:
 
 ```json
 {
 	"intervalMs": 10000,
+	"noTools": false,
 	"text": "Analysiere den Input und gib eine Kurzfassung.",
 	"smartMode": "balanced",
 	"handoffTargets": ["<bestehende-agent-id>"],
@@ -27,6 +29,7 @@ Beispiel fuer `POST /agents`:
 	"spawnAgents": [
 		{
 			"intervalMs": 15000,
+			"noTools": true,
 			"text": "Pruefe die Kurzfassung auf Risiken und schicke ein Feedback.",
 			"smartMode": "balanced",
 			"handoffTargets": ["<bestehende-agent-id>"]
@@ -41,12 +44,14 @@ Hinweise:
 - `handoffTargets` fuehren zu einem zusaetzlichen Queue-Job fuer den Ziel-Agenten.
 - `maxHandoffDepth` begrenzt die Weitergabetiefe, um Endlosschleifen zu vermeiden.
 - `runOnce: true` fuehrt den Agenten einmalig aus (ohne Repeat-Job).
+- `noTools: true` verhindert Tool-Calls sowohl in der LangChain-Stufe als auch im MCP-Client.
 
 Beispiel One-Shot mit 3 Agenten (1 Parent + 2 Childs):
 
 ```json
 {
 	"runOnce": true,
+	"noTools": true,
 	"text": "Loese die Aufgabe und konsolidiere das Ergebnis.",
 	"spawnAgents": [
 		{

@@ -56,6 +56,7 @@ const normalizeSpawnAgent = (item) => {
   return {
     intervalMs: runOnce ? null : intervalMs,
     runOnce,
+    noTools: item.noTools === true || String(item.noTools || "").toLowerCase() === "true",
     text,
     chatApiBase: typeof item.chatApiBase === "string" ? item.chatApiBase : "",
     chatApiPath: typeof item.chatApiPath === "string" ? item.chatApiPath : "",
@@ -83,6 +84,7 @@ const createChildAgent = async (parentAgentId, spec) => {
     {
       agentId: childAgentId,
       runOnce: normalized.runOnce,
+      noTools: normalized.noTools,
       text: normalized.text,
       chatApiBase: normalized.chatApiBase,
       chatApiPath: normalized.chatApiPath,
@@ -111,6 +113,7 @@ const createChildAgent = async (parentAgentId, spec) => {
     JSON.stringify({
       intervalMs: normalized.runOnce ? null : normalized.intervalMs,
       runOnce: normalized.runOnce,
+      noTools: normalized.noTools,
       text: normalized.text,
       chatApiBase: normalized.chatApiBase,
       chatApiPath: normalized.chatApiPath,
@@ -204,6 +207,7 @@ const worker = new Worker(
     const {
       agentId,
       text,
+      noTools,
       smartMode,
       ragContext,
       toolHints,
@@ -229,8 +233,10 @@ const worker = new Worker(
       memoryWindow,
       memory: [],
       mcpServerUrl,
-      enableMcpToolCalls: true
+      enableMcpToolCalls: !(noTools === true || String(noTools || "").toLowerCase() === "true")
     });
+
+    const normalizedNoTools = noTools === true || String(noTools || "").toLowerCase() === "true";
 
     const payload = {
       message,
@@ -240,8 +246,13 @@ const worker = new Worker(
       rag_context: typeof ragContext === "string" ? ragContext : "",
       tool_hints: Array.isArray(toolHints) ? toolHints : [],
       json_schema: typeof jsonSchema === "string" ? jsonSchema : "",
-      memory_window: Number(memoryWindow) > 0 ? Number(memoryWindow) : 6
+      memory_window: Number(memoryWindow) > 0 ? Number(memoryWindow) : 6,
+      no_tools: normalizedNoTools
     };
+
+    const parentPurposes = Array.isArray(purposes)
+      ? purposes.map((entry) => String(entry).trim()).filter(Boolean)
+      : [];
 
     const staticHandoffTargets = Array.isArray(handoffTargets)
       ? handoffTargets.map((entry) => String(entry).trim()).filter(Boolean)
@@ -256,14 +267,32 @@ const worker = new Worker(
       return { ...spec, handoffTargets: [...mergedHandoffTargets] };
     };
 
+    const inheritPurposes = (spec) => {
+      if (!spec || typeof spec !== "object") return spec;
+      if (Array.isArray(spec.purposes) && spec.purposes.length) return spec;
+      if (!parentPurposes.length) return spec;
+      return { ...spec, purposes: [...parentPurposes] };
+    };
+
+    const inheritNoTools = (spec) => {
+      if (!spec || typeof spec !== "object") return spec;
+      if (!normalizedNoTools) return spec;
+      return { ...spec, noTools: true };
+    };
+
     const staticSpawnAgents = Array.isArray(spawnAgents)
-      ? spawnAgents.map((item) => normalizeSpawnAgent(item)).filter(Boolean).map(inheritHandoffTargets)
+      ? spawnAgents
+          .map((item) => normalizeSpawnAgent(item))
+          .filter(Boolean)
+          .map(inheritHandoffTargets)
+          .map(inheritPurposes)
+          .map(inheritNoTools)
       : [];
     // Only root/orchestrator jobs should derive child spawns from free text markers
     // like "Unterthread 1:". Forwarded handoff jobs must not spawn again.
     const allowTextDerivedSpawn = !handoffFromAgentId;
     const dynamicSpawnAgents = allowTextDerivedSpawn
-      ? extractDynamicSpawnAgents(text).map(inheritHandoffTargets)
+      ? extractDynamicSpawnAgents(text).map(inheritHandoffTargets).map(inheritPurposes).map(inheritNoTools)
       : [];
     const mergedSpawnAgents = [...staticSpawnAgents, ...dynamicSpawnAgents];
 
@@ -307,55 +336,6 @@ const worker = new Worker(
       skippedDepth: false
     };
 
-    if (mergedHandoffTargets.length > 0) {
-      if (currentDepth >= depthLimit) {
-        handoffSummary.skippedDepth = true;
-      } else {
-        const nextDepth = currentDepth + 1;
-        for (const targetAgentId of mergedHandoffTargets) {
-          if (!targetAgentId || targetAgentId === agentId) continue;
-
-          const targetRaw = await redis.hget(AGENT_HASH, targetAgentId);
-          if (!targetRaw) continue;
-
-          let targetConfig = null;
-          try {
-            targetConfig = JSON.parse(targetRaw);
-          } catch {
-            targetConfig = null;
-          }
-          if (!targetConfig || typeof targetConfig !== "object") continue;
-
-          const forwardedText = JSON.stringify({
-            prompt: message,
-            handoff_from: agentId,
-            source_job_id: String(job.id || "")
-          });
-
-          await agentQueue.add("agent", {
-            agentId: targetAgentId,
-            text: forwardedText,
-            chatApiBase: targetConfig.chatApiBase,
-            chatApiPath: targetConfig.chatApiPath,
-            purposes: Array.isArray(targetConfig.purposes) ? targetConfig.purposes : [],
-            smartMode: targetConfig.smartMode || "balanced",
-            ragContext: typeof targetConfig.ragContext === "string" ? targetConfig.ragContext : "",
-            toolHints: Array.isArray(targetConfig.toolHints) ? targetConfig.toolHints : [],
-            jsonSchema: typeof targetConfig.jsonSchema === "string" ? targetConfig.jsonSchema : "",
-            memoryWindow: Number(targetConfig.memoryWindow) > 0 ? Number(targetConfig.memoryWindow) : 6,
-            handoffTargets: Array.isArray(targetConfig.handoffTargets) ? targetConfig.handoffTargets : [],
-            spawnAgents: Array.isArray(targetConfig.spawnAgents) ? targetConfig.spawnAgents : [],
-            maxHandoffDepth: clampMaxDepth(targetConfig.maxHandoffDepth),
-            handoffDepth: nextDepth,
-            handoffFromAgentId: agentId,
-            handoffReason: "forwarded-result"
-          });
-
-          handoffSummary.enqueued += 1;
-        }
-      }
-    }
-
     console.log("job start", new Date().toISOString(), job.id, {
       agentId,
       text,
@@ -378,13 +358,72 @@ const worker = new Worker(
         throw new Error(`MCP client error: ${res.status} ${bodyText}`);
       }
 
+      const normalizedResponse = normalizeResponseText(bodyText);
+      if (mergedHandoffTargets.length > 0) {
+        if (currentDepth >= depthLimit) {
+          handoffSummary.skippedDepth = true;
+        } else {
+          const nextDepth = currentDepth + 1;
+          for (const targetAgentId of mergedHandoffTargets) {
+            if (!targetAgentId || targetAgentId === agentId) continue;
+
+            const targetRaw = await redis.hget(AGENT_HASH, targetAgentId);
+            if (!targetRaw) continue;
+
+            let targetConfig = null;
+            try {
+              targetConfig = JSON.parse(targetRaw);
+            } catch {
+              targetConfig = null;
+            }
+            if (!targetConfig || typeof targetConfig !== "object") continue;
+
+            const targetBasePrompt =
+              typeof targetConfig.text === "string" ? targetConfig.text.trim() : "";
+            const mergedTargetPrompt = targetBasePrompt
+              ? `${targetBasePrompt}\n\n[EINGEHENDES_TEILERGEBNIS]\n${normalizedResponse}\n[/EINGEHENDES_TEILERGEBNIS]`
+              : normalizedResponse;
+
+            const forwardedText = JSON.stringify({
+              prompt: mergedTargetPrompt,
+              handoff_from: agentId,
+              source_job_id: String(job.id || "")
+            });
+
+            await agentQueue.add("agent", {
+              agentId: targetAgentId,
+              text: forwardedText,
+              chatApiBase: targetConfig.chatApiBase,
+              chatApiPath: targetConfig.chatApiPath,
+              noTools:
+                targetConfig.noTools === true ||
+                String(targetConfig.noTools || "").toLowerCase() === "true",
+              purposes: Array.isArray(targetConfig.purposes) ? targetConfig.purposes : [],
+              smartMode: targetConfig.smartMode || "balanced",
+              ragContext: typeof targetConfig.ragContext === "string" ? targetConfig.ragContext : "",
+              toolHints: Array.isArray(targetConfig.toolHints) ? targetConfig.toolHints : [],
+              jsonSchema: typeof targetConfig.jsonSchema === "string" ? targetConfig.jsonSchema : "",
+              memoryWindow: Number(targetConfig.memoryWindow) > 0 ? Number(targetConfig.memoryWindow) : 6,
+              handoffTargets: Array.isArray(targetConfig.handoffTargets) ? targetConfig.handoffTargets : [],
+              spawnAgents: Array.isArray(targetConfig.spawnAgents) ? targetConfig.spawnAgents : [],
+              maxHandoffDepth: clampMaxDepth(targetConfig.maxHandoffDepth),
+              handoffDepth: nextDepth,
+              handoffFromAgentId: agentId,
+              handoffReason: "forwarded-result"
+            });
+
+            handoffSummary.enqueued += 1;
+          }
+        }
+      }
+
       await pushAgentHistory(agentId, {
         timestamp: startedAt,
         jobId: String(job.id || ""),
         status: "ok",
         text: String(text || ""),
         message: preview(message, 400),
-        response: preview(normalizeResponseText(bodyText), 2000),
+        response: preview(normalizedResponse, 2000),
         mcpToolCalls: trace?.mcpToolCalls || null,
         orchestration: {
           spawnedChildren,

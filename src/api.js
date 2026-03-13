@@ -28,6 +28,7 @@ app.post("/agents", async (req, res) => {
   const {
     intervalMs,
     runOnce,
+    noTools,
     text,
     chatApiBase,
     chatApiPath,
@@ -42,6 +43,7 @@ app.post("/agents", async (req, res) => {
     maxHandoffDepth
   } = req.body || {};
   const normalizedRunOnce = runOnce === true || String(runOnce || "").toLowerCase() === "true";
+  const normalizedNoTools = noTools === true || String(noTools || "").toLowerCase() === "true";
   const normalizedIntervalMs = Number(intervalMs);
   if (!text || (!normalizedRunOnce && (!normalizedIntervalMs || normalizedIntervalMs < 1000))) {
     return res.status(400).json({ error: "text erforderlich, und entweder runOnce=true oder intervalMs >= 1000" });
@@ -81,6 +83,8 @@ app.post("/agents", async (req, res) => {
           return {
             intervalMs: childRunOnce ? null : childIntervalMs,
             runOnce: childRunOnce,
+            noTools:
+              item.noTools === true || String(item.noTools || "").toLowerCase() === "true",
             text: childText,
             chatApiBase: typeof item.chatApiBase === "string" ? item.chatApiBase : "",
             chatApiPath: typeof item.chatApiPath === "string" ? item.chatApiPath : "",
@@ -113,6 +117,7 @@ app.post("/agents", async (req, res) => {
     {
       agentId,
       runOnce: normalizedRunOnce,
+      noTools: normalizedNoTools,
       text,
       chatApiBase,
       chatApiPath,
@@ -140,6 +145,7 @@ app.post("/agents", async (req, res) => {
     JSON.stringify({
       intervalMs: normalizedRunOnce ? null : normalizedIntervalMs,
       runOnce: normalizedRunOnce,
+      noTools: normalizedNoTools,
       text,
       chatApiBase,
       chatApiPath,
@@ -159,6 +165,7 @@ app.post("/agents", async (req, res) => {
     agentId,
     intervalMs: normalizedRunOnce ? null : normalizedIntervalMs,
     runOnce: normalizedRunOnce,
+    noTools: normalizedNoTools,
     text,
     chatApiBase,
     chatApiPath,
