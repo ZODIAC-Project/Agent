@@ -4,13 +4,70 @@ Agent Service (BullMQ + Redis)
 
 [Redis](https://redis.io/blog/what-is-an-ai-agent/#Want_to_build_your_own_AI_agent_Try_Redis)
 
+[LangChain](https://https://www.langchain.com/)
+
 Der Agent schickt eine/mehrere Nachricht/Nachrichten in einem fixen Intervall zu dem MCP Client. Gesteuert wird dies Über die OrionUI.
 
-### Image Tagging script:
-If you want to build and push new images to your registry, you can use the following script to build and then tag the images with the digest.
+Agent-Messages laufen jetzt durch eine LangChain-Pipeline (Retry/Fallback/Parser), bevor sie an MCP geht.
 
-NOTE: The script only works for single image Dockerfiles. Therefore this script is changed to print the final name in the command line. You can then copy it into the deployment file manually.
+## Multi-Agent Orchestrierung
 
-```bash
-./image_tagging_script.sh -f ./Dockerfile --token-file token-file.txt --username git  git.tu-berlin.de:5000/zodiac/zodiac-meta/agent k8s/deployment.yaml
+Ein Agent kann weitere Agenten anlegen (`spawnAgents`) und Ergebnisse an andere bestehende Agenten weiterreichen (`handoffTargets`).
+Fuer einmalige Ausfuehrung ohne Intervall kann `runOnce: true` gesetzt werden.
+Mit `noTools: true` wird Tool-Nutzung hart serverseitig gesperrt.
+
+Beispiel fuer `POST /agents`:
+
+```json
+{
+	"intervalMs": 10000,
+	"noTools": false,
+	"text": "Analysiere den Input und gib eine Kurzfassung.",
+	"smartMode": "balanced",
+	"handoffTargets": ["<bestehende-agent-id>"],
+	"maxHandoffDepth": 2,
+	"spawnAgents": [
+		{
+			"intervalMs": 15000,
+			"noTools": true,
+			"text": "Pruefe die Kurzfassung auf Risiken und schicke ein Feedback.",
+			"smartMode": "balanced",
+			"handoffTargets": ["<bestehende-agent-id>"]
+		}
+	]
+}
 ```
+
+Hinweise:
+- `spawnAgents` werden beim Lauf des Parent-Agenten automatisch erstellt.
+- `spawnAgents` werden pro Parent-Agent nur einmal initialisiert (kein Spawn bei jedem Tick).
+- `handoffTargets` fuehren zu einem zusaetzlichen Queue-Job fuer den Ziel-Agenten.
+- `maxHandoffDepth` begrenzt die Weitergabetiefe, um Endlosschleifen zu vermeiden.
+- `runOnce: true` fuehrt den Agenten einmalig aus (ohne Repeat-Job).
+- `noTools: true` verhindert Tool-Calls sowohl in der LangChain-Stufe als auch im MCP-Client.
+
+Beispiel One-Shot mit 3 Agenten (1 Parent + 2 Childs):
+
+```json
+{
+	"runOnce": true,
+	"noTools": true,
+	"text": "Loese die Aufgabe und konsolidiere das Ergebnis.",
+	"spawnAgents": [
+		{
+			"runOnce": true,
+			"text": "Analysiere Teilproblem A und gib ein kurzes Ergebnis.",
+			"handoffTargets": ["<ID-des-Konsolidierungs-Agenten>"]
+		},
+		{
+			"runOnce": true,
+			"text": "Analysiere Teilproblem B und gib ein kurzes Ergebnis.",
+			"handoffTargets": ["<ID-des-Konsolidierungs-Agenten>"]
+		}
+	]
+}
+```
+
+Agent-logs:
+
+```kubectl logs -n zodiac deploy/agent-worker```

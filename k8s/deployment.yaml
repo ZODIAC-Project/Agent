@@ -80,7 +80,7 @@ spec:
         - name: regcred
       containers:
         - name: agent-api
-          image: sonak53/agent:v5
+          image: sonak53/agent:v7
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
@@ -116,7 +116,7 @@ spec:
         - name: regcred
       containers:
         - name: agent-worker
-          image: sonak53/agent:v5
+          image: sonak53/agent:v7
           imagePullPolicy: Always
           command: ["npm", "run", "worker"]
           env:

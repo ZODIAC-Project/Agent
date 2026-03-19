@@ -7,6 +7,10 @@ services:
   agent-api:
     build: .
     env_file: .env
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://host.docker.internal:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: agent-api
     command: ["npm", "run", "api"]
     ports:
       - "3000:3000"
@@ -16,6 +20,10 @@ services:
   agent-worker:
     build: .
     env_file: .env
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://host.docker.internal:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: agent-worker
     command: ["npm", "run", "worker"]
     depends_on:
       - redis
