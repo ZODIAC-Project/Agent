@@ -1,8 +1,10 @@
 import "dotenv/config";
+import "./telemetry.js";
 import { Worker } from "bullmq";
 import crypto from "crypto";
 import { agentQueue, redis } from "./queue.js";
 import { buildAgentMessage } from "./langchain.js";
+import { metrics, trace, SpanStatusCode } from "@opentelemetry/api";
 
 const mcpClientUrl = process.env.MCP_CLIENT_URL;
 const mcpServerUrl = process.env.MCP_SERVER_URL;
@@ -10,6 +12,27 @@ const AGENT_HISTORY_PREFIX = "agent:history:";
 const AGENT_HISTORY_MAX = Number(process.env.AGENT_HISTORY_MAX || 200);
 const AGENT_HASH = "agents";
 const AGENT_SPAWN_STATE_PREFIX = "agent:spawned:";
+
+const meter = metrics.getMeter("agent-worker");
+const jobCounter = meter.createCounter("agent_jobs_total", {
+  description: "Agent job executions"
+});
+const jobDuration = meter.createHistogram("agent_job_duration_ms", {
+  description: "Agent job duration in ms",
+  unit: "ms"
+});
+const mcpDuration = meter.createHistogram("agent_mcp_request_duration_ms", {
+  description: "MCP client request duration in ms",
+  unit: "ms"
+});
+const handoffCounter = meter.createCounter("agent_handoff_enqueued_total", {
+  description: "Number of handoff jobs enqueued"
+});
+const spawnCounter = meter.createCounter("agent_spawned_children_total", {
+  description: "Number of spawned child agents"
+});
+
+const tracer = trace.getTracer("agent-worker");
 
 const normalizeBase = (value) => (value.endsWith("/") ? value.slice(0, -1) : value);
 const normalizePath = (value) => (value.startsWith("/") ? value : `/${value}`);
@@ -204,6 +227,14 @@ const resolveChatUrl = (jobData) => {
 const worker = new Worker(
   "agent-queue",
   async (job) => {
+    const startedAtMs = Date.now();
+    const rootSpan = tracer.startSpan("agent.job", {
+      attributes: {
+        "agent.id": job?.data?.agentId ?? "",
+        "job.id": String(job?.id ?? "")
+      }
+    });
+    let jobStatus = "ok";
     const {
       agentId,
       text,
@@ -347,12 +378,35 @@ const worker = new Worker(
     const startedAt = new Date().toISOString();
     const chatUrl = resolveChatUrl(job.data);
     try {
-      const res = await fetch(chatUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+      const mcpSpan = tracer.startSpan("mcp.request", {
+        attributes: {
+          "agent.id": agentId,
+          "job.id": String(job.id || ""),
+          "http.url": chatUrl
+        }
       });
-      const bodyText = await res.text();
+      const mcpStartMs = Date.now();
+      let res;
+      let bodyText = "";
+      try {
+        res = await fetch(chatUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        bodyText = await res.text();
+        mcpDuration.record(Date.now() - mcpStartMs, {
+          status: res.ok ? "ok" : "error"
+        });
+        mcpSpan.setStatus({ code: res.ok ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+      } catch (error) {
+        mcpDuration.record(Date.now() - mcpStartMs, { status: "error" });
+        mcpSpan.recordException(error);
+        mcpSpan.setStatus({ code: SpanStatusCode.ERROR });
+        throw error;
+      } finally {
+        mcpSpan.end();
+      }
 
       if (!res.ok) {
         throw new Error(`MCP client error: ${res.status} ${bodyText}`);
@@ -417,6 +471,14 @@ const worker = new Worker(
         }
       }
 
+      if (handoffSummary.enqueued > 0) {
+        handoffCounter.add(handoffSummary.enqueued);
+      }
+
+      if (spawnedChildren.length > 0) {
+        spawnCounter.add(spawnedChildren.length);
+      }
+
       await pushAgentHistory(agentId, {
         timestamp: startedAt,
         jobId: String(job.id || ""),
@@ -438,6 +500,9 @@ const worker = new Worker(
 
       console.log("job ok", new Date().toISOString(), job.id, res.status);
     } catch (error) {
+      jobStatus = "error";
+      rootSpan.recordException(error);
+      rootSpan.setStatus({ code: SpanStatusCode.ERROR });
       const messageText = error instanceof Error ? error.message : String(error);
       try {
         await pushAgentHistory(agentId, {
@@ -460,6 +525,11 @@ const worker = new Worker(
         console.error("failed to persist agent history", historyError);
       }
       throw error;
+    } finally {
+      const elapsedMs = Date.now() - startedAtMs;
+      jobCounter.add(1, { status: jobStatus });
+      jobDuration.record(elapsedMs, { status: jobStatus });
+      rootSpan.end();
     }
   },
   { connection: agentQueue.opts.connection }

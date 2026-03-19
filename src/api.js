@@ -1,8 +1,10 @@
 import "dotenv/config";
+import "./telemetry.js";
 import express from "express";
 import crypto from "crypto";
 import { agentQueue, redis } from "./queue.js";
 import { getLangchainFeatureSet } from "./langchain.js";
+import { metrics } from "@opentelemetry/api";
 
 const app = express();
 app.use(express.json());
@@ -10,6 +12,11 @@ app.use(express.json());
 const AGENT_HASH = "agents";
 const AGENT_HISTORY_PREFIX = "agent:history:";
 const AGENT_SPAWN_STATE_PREFIX = "agent:spawned:";
+
+const meter = metrics.getMeter("agent-api");
+const agentCreateCounter = meter.createCounter("agent_create_total", {
+  description: "Number of agents created via API"
+});
 
 const getAgentHistoryKey = (agentId) => `${AGENT_HISTORY_PREFIX}${agentId}`;
 const getAgentSpawnStateKey = (agentId) => `${AGENT_SPAWN_STATE_PREFIX}${agentId}`;
@@ -178,6 +185,10 @@ app.post("/agents", async (req, res) => {
     handoffTargets: normalizedHandoffTargets,
     spawnAgents: normalizedSpawnAgents,
     maxHandoffDepth: normalizedMaxHandoffDepth
+  });
+  agentCreateCounter.add(1, {
+    run_once: normalizedRunOnce ? "true" : "false",
+    smart_mode: normalizedSmartMode
   });
 });
 
