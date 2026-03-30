@@ -29,8 +29,6 @@ class Agent(BaseModel):
     runOnce: bool
     text: str
     purposes: list[str]
-    smartMode: bool
-    ragContext: str
     memoryWindow: int
 
 con = sqlite3.connect('agents.db')
@@ -43,11 +41,20 @@ c.execute('''CREATE TABLE IF NOT EXISTS agents (
     runOnce INTEGER,
     text TEXT,
     purposes TEXT,
-    smartMode INTEGER,
-    ragContext TEXT,
     memoryWindow INTEGER
 )''')
 con.commit()
+
+c.execute('''CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT,
+    timestamp INTEGER,
+    type TEXT,
+    message TEXT,
+    FOREIGN KEY (agent_id) REFERENCES agents (id)
+)''')
+con.commit()
+
 con.close()
 
 @asynccontextmanager
@@ -88,19 +95,19 @@ def create_agent(agent: Agent):
 
     interval_ms = max(1000, agent.intervalMs)  # Ensure minimum interval of 1 second
 
+    # Insert the new agent into the database
     c.execute(
-        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, smartMode, ragContext, memoryWindow) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, memoryWindow) VALUES (?, ?, ?, ?, ?, ?)",
         (
             agent_id,
             interval_ms,
             1 if agent.runOnce else 0,
             agent.text,
             json.dumps(agent.purposes),
-            1 if agent.smartMode else 0,
-            agent.ragContext,
             agent.memoryWindow,
         )
     )
+
     con.commit()
     con.close()
     interval_seconds = max(1, interval_ms / 1000)
@@ -122,12 +129,27 @@ def get_agents():
             "runOnce": bool(row[2]),
             "text": row[3],
             "purposes": json.loads(row[4]),
-            "smartMode": bool(row[5]),
-            "ragContext": row[6],
-            "memoryWindow": row[7],
+            "memoryWindow": row[5],
         })
     con.close()
     return agents
+
+@app.get("/agents/{agent_id}/history")
+def get_agent_history(agent_id: str):
+    con = sqlite3.connect('agents.db')
+    c = con.cursor()
+    c.execute(f"SELECT * FROM history WHERE agent_id = ?", (agent_id,))
+    rows = c.fetchall()
+    history = []
+    for row in rows:
+        history.append({
+            "id": row[0],
+            "timestamp": row[2],
+            "type": row[3],
+            "message": row[4]
+        })
+    con.close()
+    return history
 
 @app.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
@@ -140,6 +162,7 @@ def delete_agent(agent_id: str):
         con.close()
         raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
     c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+    c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
     con.commit()
     con.close()
     return {"message": f"Agent with id {agent_id} deleted"}
@@ -148,6 +171,7 @@ def delete_agent(agent_id: str):
 def delete_all_agents():
     con = sqlite3.connect('agents.db')
     c = con.cursor()
+    c.execute("DELETE FROM history")
     c.execute("DELETE FROM agents")
     con.commit()
     con.close()
@@ -172,15 +196,28 @@ def agent_task(agent_id):
         "purposes": json.loads(agent[4]),
         "session_id": agent_id
     }
+
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", agent[3]))
+    con.commit()
     
     x = requests.post(MCP_URL, json=data)
+
+    # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
+    c.execute("SELECT id FROM agents WHERE id = ?", (agent_id,))
+    agent = c.fetchone()
+    if not agent:
+        con.close()
+        return
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", x.text))
+    con.commit()
+
     logging.info(f"Agent {agent_id} task response: {x.text}")
-    #logging.info(f"Agent {agent_id}")
     
     # 3. Reschedule the task if it's not a run-once agent
 
     if agent[2]:  # runOnce is True
         c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
         con.commit()
         con.close()
         logging.info(f"Run-once Agent {agent_id} deleted after execution")
