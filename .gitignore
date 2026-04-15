@@ -12,3 +12,6 @@ wheels/
 # database files
 *.db
 *.sqlite3
+
+# etc
+token-file.txt

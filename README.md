@@ -14,10 +14,8 @@ create a new agent
 curl -X POST "http://127.0.0.1:8000/agents" -H "Content-Type: application/json" -d '{
     "intervalMs": 5000,
     "runOnce": true,
-    "text": "respond only with the word test",
+    "text": "what is your favourite color?",
     "purposes": ["cleanup-test"],
-    "smartMode": false,
-    "ragContext": "None",
     "memoryWindow": 1
 }'
 ```

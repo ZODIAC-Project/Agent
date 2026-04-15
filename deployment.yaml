@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: zodiac
+  name: temp-agent
+  labels:
+    app: temp-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temp-agent
+  template:
+    metadata:
+      labels:
+        app: temp-agent
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: temp-agent
+          image: git.tu-berlin.de:5000/zodiac/zodiac-meta/temp-agent@sha256:223407b68308511505bfa4b857465be4ddadb58ae1ef37e9b6e5026eb8ff627f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 30086
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: zodiac
+  name: temp-agent-service
+spec:
+  type: NodePort
+  selector:
+    app: temp-agent
+  ports:
+    - protocol: TCP
+      port: 30086
+      targetPort: 30086
+      nodePort: 30086

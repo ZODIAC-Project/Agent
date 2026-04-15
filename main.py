@@ -1,6 +1,8 @@
 
+import asyncio
+
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from uuid import UUID, uuid4
@@ -203,12 +205,14 @@ def agent_task(agent_id):
     x = requests.post(MCP_URL, json=data)
 
     # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
-    c.execute("SELECT id FROM agents WHERE id = ?", (agent_id,))
+    c.execute("SELECT id, intervalMs, runOnce, text, purposes FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
     if not agent:
         con.close()
         return
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", x.text))
+
+    res = json.loads(x.text)
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", res["response"]))
     con.commit()
 
     logging.info(f"Agent {agent_id} task response: {x.text}")
@@ -225,3 +229,54 @@ def agent_task(agent_id):
         interval_seconds = max(1, agent[1] / 1000)
         threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
     con.close()
+
+@app.websocket("/agents")
+async def websocket_agents(websocket: WebSocket):
+    # live update of all agents for dashboard
+    await websocket.accept()
+    while True:
+        try:
+            con = sqlite3.connect('agents.db')
+            c = con.cursor()
+            c.execute("SELECT id, intervalMs, runOnce, text, purposes, memoryWindow FROM agents")
+            rows = c.fetchall()
+            agents = []
+            for row in rows:
+                agents.append({
+                    "id": row[0],
+                    "intervalMs": row[1],
+                    "runOnce": bool(row[2]),
+                    "text": row[3],
+                    "purposes": json.loads(row[4]),
+                    "memoryWindow": row[5],
+                })
+            await websocket.send_text(json.dumps(agents))
+            con.close()
+            await asyncio.sleep(1) # send updates every second
+        except Exception as e:
+            logging.error(f"Websocket error: {e}")
+            break
+
+@app.websocket("/agents/{agent_id}/history")
+async def websocket_agent_history(websocket: WebSocket, agent_id: str):
+    await websocket.accept()
+    while True:
+        try:
+            con = sqlite3.connect('agents.db')
+            c = con.cursor()
+            c.execute("SELECT agent_id, timestamp, type, message FROM history WHERE agent_id = ? ORDER BY id DESC LIMIT 50", (agent_id,))
+            rows = c.fetchall()
+            entries = []
+            for row in rows:
+                entries.append({
+                    "timestamp": row[1],
+                    "type": row[2],
+                    "message": row[3]
+                })
+            entries = entries[::-1]
+            await websocket.send_text(json.dumps(entries))
+            con.close()
+            await asyncio.sleep(1) # send updates every second
+        except Exception as e:
+            logging.error(f"Websocket error: {e}")
+            break
