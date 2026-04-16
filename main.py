@@ -267,7 +267,7 @@ async def websocket_agents(websocket: WebSocket):
         try:
             con = sqlite3.connect('agents.db')
             c = con.cursor()
-            c.execute("SELECT id, intervalMs, runOnce, text, purposes, memoryWindow FROM agents")
+            c.execute("SELECT id, intervalMs, runOnce, text, purposes, memoryWindow, paused FROM agents")
             rows = c.fetchall()
             agents = []
             for row in rows:
@@ -278,6 +278,7 @@ async def websocket_agents(websocket: WebSocket):
                     "text": row[3],
                     "purposes": json.loads(row[4]),
                     "memoryWindow": row[5],
+                    "paused": bool(row[6]),
                 })
             await websocket.send_text(json.dumps(agents))
             con.close()
