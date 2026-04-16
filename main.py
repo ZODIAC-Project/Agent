@@ -32,6 +32,7 @@ class Agent(BaseModel):
     text: str
     purposes: list[str]
     memoryWindow: int
+    paused: bool = False
 
 con = sqlite3.connect('agents.db')
 c = con.cursor()
@@ -43,7 +44,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS agents (
     runOnce INTEGER,
     text TEXT,
     purposes TEXT,
-    memoryWindow INTEGER
+    memoryWindow INTEGER,
+    paused INTEGER
 )''')
 con.commit()
 
@@ -99,7 +101,7 @@ def create_agent(agent: Agent):
 
     # Insert the new agent into the database
     c.execute(
-        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, memoryWindow) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, memoryWindow, paused) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             agent_id,
             interval_ms,
@@ -107,6 +109,7 @@ def create_agent(agent: Agent):
             agent.text,
             json.dumps(agent.purposes),
             agent.memoryWindow,
+            1 if agent.paused else 0,
         )
     )
 
@@ -132,9 +135,28 @@ def get_agents():
             "text": row[3],
             "purposes": json.loads(row[4]),
             "memoryWindow": row[5],
+            "paused": bool(row[6]),
         })
     con.close()
     return agents
+
+@app.post("/agents/{agent_id}")
+def modify_agent(agent_id: str, options: dict):
+    con = sqlite3.connect('agents.db')
+    c = con.cursor()
+    c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+    agent = c.fetchone()
+    if not agent:
+        con.close()
+        raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
+    if "pause" in options and options["pause"]:
+        c.execute("UPDATE agents SET paused = 1 WHERE id = ?", (agent_id,))
+    if "pause" in options and not options["pause"]:
+        c.execute("UPDATE agents SET paused = 0 WHERE id = ?", (agent_id,))
+    con.commit()
+    con.close()
+    return {"message": f"Agent with id {agent_id} updated"}
+
 
 @app.get("/agents/{agent_id}/history")
 def get_agent_history(agent_id: str):
@@ -184,12 +206,19 @@ def agent_task(agent_id):
 
     con = sqlite3.connect('agents.db')
     c = con.cursor()
-    c.execute("SELECT id, intervalMs, runOnce, text, purposes FROM agents WHERE id = ?", (agent_id,))
+    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
     if not agent:
         con.close()
         return
     logging.info(f"Running task for agent {agent_id}")
+
+    if agent[5]:  # paused is True
+        logging.info(f"Agent {agent_id} is paused, skipping execution")
+        interval_seconds = max(1, agent[1] / 1000)
+        threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+        con.close()
+        return
 
     # 2. Make the POST request to the MCP with the agent's text and purposes
 
