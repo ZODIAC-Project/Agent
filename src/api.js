@@ -5,9 +5,11 @@ import crypto from "crypto";
 import { agentQueue, redis } from "./queue.js";
 import { getLangchainFeatureSet } from "./langchain.js";
 import { metrics } from "@opentelemetry/api";
+import cors from "cors";
 
 const app = express();
 app.use(express.json());
+app.use(cors()); // Erlaubt Anfragen von allen Origins
 
 const AGENT_HASH = "agents";
 const AGENT_HISTORY_PREFIX = "agent:history:";
