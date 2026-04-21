@@ -9,7 +9,7 @@ import cors from "cors";
 
 const app = express();
 app.use(express.json());
-app.use(cors()); // Erlaubt Anfragen von allen Origins
+app.use(cors());
 
 const AGENT_HASH = "agents";
 const AGENT_HISTORY_PREFIX = "agent:history:";
