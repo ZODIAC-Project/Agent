@@ -2,12 +2,12 @@ name: Deploy Agent
 
 on:
   push:
-    branches: ["main"]
+    branches: ["new-agent"]
 
 env:
   REGISTRY: git.tu-berlin.de:5000/zodiac/zodiac-meta
 
-  IMAGE_NAME: agent
+  IMAGE_NAME: new-agent
   CONTEXT: .
   DOCKERFILE: ./Dockerfile
 
