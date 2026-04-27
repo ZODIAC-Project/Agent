@@ -7,6 +7,9 @@
 `DELETE /agents` - delete all agents  
 `DELETE /agents/{agent-id}` - delete the agent with the id `{agent-id}`
 
+**run locally:**  
+`uv run python -m uvicorn main:app --host 0.0.0.0 --port 30086`
+
 **example requests:** (replace the ip with the correct target ip)
 
 create a new agent

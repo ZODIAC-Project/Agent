@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 # OpenTelemetry
 from opentelemetry import metrics
-from opentelemetry.exporter.prometheus import PreometheusExporter
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
 from prometheus_client import start_http_server
 # other
@@ -30,7 +30,7 @@ logging.basicConfig(
     ]
 )
 
-exporter = PreometheusExporter()
+exporter = PrometheusMetricReader()
 provider = MeterProvider(metric_readers=[exporter])
 metrics.set_meter_provider(provider)
 
