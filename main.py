@@ -1,15 +1,20 @@
-
-import asyncio
-
+# web server
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
+# OpenTelemetry
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PreometheusExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import start_http_server
+# other
 from uuid import UUID, uuid4
 import threading
 import requests
 import sqlite3
 import logging
+import asyncio
 import time
 import json
 import sys
@@ -24,6 +29,15 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+exporter = PreometheusExporter()
+provider = MeterProvider(metric_readers=[exporter])
+metrics.set_meter_provider(provider)
+
+start_http_server(8000)
+
+meter = metrics.get_meter("zodiac.agent_api")
+agent_create_counter = meter.create_counter("agent_create_total", description="Total number of agents created")
 
 class Agent(BaseModel):
     id: UUID | None = None
@@ -117,7 +131,7 @@ def create_agent(agent: Agent):
     con.close()
     interval_seconds = max(1, interval_ms / 1000)
     threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
-
+    agent_create_counter.add(1)
     return {"id": agent_id}
 
 @app.get("/agents")
