@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 # OpenTelemetry
 from opentelemetry import metrics
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
-from prometheus_client import start_http_server
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 # other
 from uuid import UUID, uuid4
 import threading
@@ -17,27 +17,27 @@ import logging
 import asyncio
 import time
 import json
-import sys
 import os
 
 MCP_URL = os.getenv("MCP_URL", "http://130.149.158.32:30084/chat")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+exporter = OTLPMetricExporter(
+    endpoint="http://otel-collector.zodiac.svc.cluster.local:4317"
 )
-
-exporter = PrometheusMetricReader()
-provider = MeterProvider(metric_readers=[exporter])
+reader = PeriodicExportingMetricReader(exporter, export_interval_millis=5000)
+provider = MeterProvider(metric_readers=[reader])
 metrics.set_meter_provider(provider)
 
-start_http_server(8000)
+meter = metrics.get_meter(__name__)
+agent_create_total = meter.create_counter(
+    "agent_create_total",
+    description="Total number of agents created"
+)
 
-meter = metrics.get_meter("zodiac.agent_api")
-agent_create_counter = meter.create_counter("agent_create_total", description="Total number of agents created")
+otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://loki-gateway.logging.svc.cluster.local:4317")
+if not otel_endpoint:
+    # We will just print it without fallback since our old collector should still work with just printed logs 
+    logger.warning(f"OTEL_EXPORTER_OTLP_ENDPOINT not set.")
 
 class Agent(BaseModel):
     id: UUID | None = None
@@ -111,6 +111,8 @@ def create_agent(agent: Agent):
     con = sqlite3.connect('agents.db')
     c = con.cursor()
 
+    # TODO: differentiate between timed agent and event-based agent
+
     interval_ms = max(1000, agent.intervalMs)  # Ensure minimum interval of 1 second
 
     # Insert the new agent into the database
@@ -131,7 +133,7 @@ def create_agent(agent: Agent):
     con.close()
     interval_seconds = max(1, interval_ms / 1000)
     threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
-    agent_create_counter.add(1)
+    agent_create_total.add(1)
     return {"id": agent_id}
 
 @app.get("/agents")
@@ -167,6 +169,10 @@ def modify_agent(agent_id: str, options: dict):
         c.execute("UPDATE agents SET paused = 1 WHERE id = ?", (agent_id,))
     if "pause" in options and not options["pause"]:
         c.execute("UPDATE agents SET paused = 0 WHERE id = ?", (agent_id,))
+    if "datapoint" in options:
+        # TODO: do stuff
+        pass
+
     con.commit()
     con.close()
     return {"message": f"Agent with id {agent_id} updated"}
