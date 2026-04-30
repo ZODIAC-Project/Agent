@@ -29,15 +29,21 @@ provider = MeterProvider(metric_readers=[reader])
 metrics.set_meter_provider(provider)
 
 meter = metrics.get_meter(__name__)
+
 agent_create_total = meter.create_counter(
     "agent_create_total",
     description="Total number of agents created"
 )
 
-otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://loki-gateway.logging.svc.cluster.local:4317")
-if not otel_endpoint:
-    # We will just print it without fallback since our old collector should still work with just printed logs 
-    logger.warning(f"OTEL_EXPORTER_OTLP_ENDPOINT not set.")
+agent_jobs_total = meter.create_counter(
+    "agent_jobs_total",
+    description="Total number of agent jobs executed"
+)
+
+agent_job_duration = meter.create_histogram(
+    "agent_job_duration_ms",
+    description="Duration of agent jobs in milliseconds"
+)
 
 class Agent(BaseModel):
     id: UUID | None = None
@@ -251,8 +257,12 @@ def agent_task(agent_id):
     c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", agent[3]))
     con.commit()
     
+    start_time = time.time()
     x = requests.post(MCP_URL, json=data)
+    duration_ms = (time.time() - start_time) * 1000
 
+    agent_job_duration.record(duration_ms, {"agent_id": agent_id})
+    agent_jobs_total.add(1)
     # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
     c.execute("SELECT id, intervalMs, runOnce, text, purposes FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
