@@ -148,8 +148,7 @@ def create_agent(agent: Agent):
     con.close()
 
     if not agent.listenTopic:
-        interval_seconds = max(1, interval_ms / 1000)
-        threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+        threading.Timer(0, agent_task, args=[agent_id]).start()
     agent_create_total.add(1)
     return {"id": agent_id}
 
