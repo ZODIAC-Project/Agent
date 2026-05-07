@@ -123,6 +123,7 @@ def create_agent(agent: Agent):
     c = con.cursor()
 
     listen_topic = None
+    interval_ms = None
     if agent.listenTopic: # event-based agent
         listen_topic = agent.listenTopic
     else: # timed agent
