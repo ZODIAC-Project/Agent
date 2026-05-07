@@ -53,6 +53,7 @@ class Agent(BaseModel):
     purposes: list[str]
     memoryWindow: int
     paused: bool = False
+    listenTopic: str | None = None
 
 con = sqlite3.connect('agents.db')
 c = con.cursor()
@@ -65,7 +66,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS agents (
     text TEXT,
     purposes TEXT,
     memoryWindow INTEGER,
-    paused INTEGER
+    paused INTEGER,
+    listenTopic TEXT
 )''')
 con.commit()
 
@@ -117,13 +119,15 @@ def create_agent(agent: Agent):
     con = sqlite3.connect('agents.db')
     c = con.cursor()
 
-    # TODO: differentiate between timed agent and event-based agent
-
-    interval_ms = max(1000, agent.intervalMs)  # Ensure minimum interval of 1 second
+    listen_topic = None
+    if agent.listenTopic: # event-based agent
+        listen_topic = agent.listenTopic
+    else: # timed agent
+        interval_ms = max(1000, agent.intervalMs)  # Ensure minimum interval of 1 second
 
     # Insert the new agent into the database
     c.execute(
-        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, memoryWindow, paused) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, intervalMs, runOnce, text, purposes, memoryWindow, paused, listenTopic) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             agent_id,
             interval_ms,
@@ -132,6 +136,7 @@ def create_agent(agent: Agent):
             json.dumps(agent.purposes),
             agent.memoryWindow,
             1 if agent.paused else 0,
+            listen_topic
         )
     )
 
@@ -158,6 +163,7 @@ def get_agents():
             "purposes": json.loads(row[4]),
             "memoryWindow": row[5],
             "paused": bool(row[6]),
+            "listenTopic": row[7]
         })
     con.close()
     return agents
@@ -166,7 +172,7 @@ def get_agents():
 def modify_agent(agent_id: str, options: dict):
     con = sqlite3.connect('agents.db')
     c = con.cursor()
-    c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
     if not agent:
         con.close()
@@ -176,8 +182,10 @@ def modify_agent(agent_id: str, options: dict):
     if "pause" in options and not options["pause"]:
         c.execute("UPDATE agents SET paused = 0 WHERE id = ?", (agent_id,))
     if "datapoint" in options:
-        # TODO: do stuff
-        pass
+        if agent[5]: # paused is True
+            logging.info(f"Event-Agent {agent_id} is paused, skipping execution")
+        if not send_msg(agent_id, agent, c, con, pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} "):
+            con.close()
 
     con.commit()
     con.close()
@@ -232,7 +240,7 @@ def agent_task(agent_id):
 
     con = sqlite3.connect('agents.db')
     c = con.cursor()
-    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused FROM agents WHERE id = ?", (agent_id,))
+    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
     if not agent:
         con.close()
@@ -248,33 +256,9 @@ def agent_task(agent_id):
 
     # 2. Make the POST request to the MCP with the agent's text and purposes
 
-    data = {
-        "message": agent[3],
-        "purposes": json.loads(agent[4]),
-        "session_id": agent_id
-    }
-
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", agent[3]))
-    con.commit()
-    
-    start_time = time.time()
-    x = requests.post(MCP_URL, json=data)
-    duration_ms = (time.time() - start_time) * 1000
-
-    agent_job_duration.record(duration_ms, {"agent_id": agent_id})
-    agent_jobs_total.add(1)
-    # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
-    c.execute("SELECT id, intervalMs, runOnce, text, purposes FROM agents WHERE id = ?", (agent_id,))
-    agent = c.fetchone()
-    if not agent:
+    if not send_msg(agent_id, agent, c, con):
         con.close()
         return
-
-    res = json.loads(x.text)
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", res["response"]))
-    con.commit()
-
-    logging.info(f"Agent {agent_id} task response: {x.text}")
     
     # 3. Reschedule the task if it's not a run-once agent
 
@@ -289,6 +273,35 @@ def agent_task(agent_id):
         threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
     con.close()
 
+def send_msg(agent_id, agent, c, con, pretext=""):
+    data = {
+        "message": pretext + agent[3],
+        "purposes": json.loads(agent[4]),
+        "session_id": agent_id
+    }
+
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", pretext + agent[3]))
+    con.commit()
+    
+    start_time = time.time()
+    x = requests.post(MCP_URL, json=data)
+    duration_ms = (time.time() - start_time) * 1000
+
+    agent_job_duration.record(duration_ms, {"agent_id": agent_id})
+    agent_jobs_total.add(1)
+    # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
+    c.execute("SELECT id, intervalMs, runOnce, text, purposes, listenTopic FROM agents WHERE id = ?", (agent_id,))
+    agent = c.fetchone()
+    if not agent:
+        return False
+
+    res = json.loads(x.text)
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", res["response"]))
+    con.commit()
+
+    logging.info(f"Agent {agent_id} task response: {x.text}")
+    return True
+
 @app.websocket("/agents")
 async def websocket_agents(websocket: WebSocket):
     # live update of all agents for dashboard
@@ -297,7 +310,7 @@ async def websocket_agents(websocket: WebSocket):
         try:
             con = sqlite3.connect('agents.db')
             c = con.cursor()
-            c.execute("SELECT id, intervalMs, runOnce, text, purposes, memoryWindow, paused FROM agents")
+            c.execute("SELECT id, intervalMs, runOnce, text, purposes, memoryWindow, paused, listenTopic FROM agents")
             rows = c.fetchall()
             agents = []
             for row in rows:
@@ -309,6 +322,7 @@ async def websocket_agents(websocket: WebSocket):
                     "purposes": json.loads(row[4]),
                     "memoryWindow": row[5],
                     "paused": bool(row[6]),
+                    "listenTopic": row[7]
                 })
             await websocket.send_text(json.dumps(agents))
             con.close()
