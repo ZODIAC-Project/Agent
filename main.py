@@ -47,7 +47,7 @@ agent_job_duration = meter.create_histogram(
 
 class Agent(BaseModel):
     id: UUID | None = None
-    intervalMs: int
+    intervalMs: int | None = None
     runOnce: bool
     text: str
     purposes: list[str]
@@ -115,6 +115,9 @@ def health():
 
 @app.post("/agents")
 def create_agent(agent: Agent):
+    if not agent.listenTopic and not agent.intervalMs:
+        raise HTTPException(status_code=400, detail="Either intervalMs or listenTopic must be set")
+    
     agent_id = str(uuid4())
     con = sqlite3.connect('agents.db')
     c = con.cursor()
