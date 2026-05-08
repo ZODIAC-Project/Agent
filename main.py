@@ -1,13 +1,9 @@
 # web server
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
-# OpenTelemetry
-from opentelemetry import metrics
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 # other
 from uuid import UUID, uuid4
 import threading
@@ -21,28 +17,32 @@ import os
 
 MCP_URL = os.getenv("MCP_URL", "http://130.149.158.32:30084/chat")
 
-exporter = OTLPMetricExporter(
-    endpoint="http://otel-collector.zodiac.svc.cluster.local:4317"
-)
-reader = PeriodicExportingMetricReader(exporter, export_interval_millis=5000)
-provider = MeterProvider(metric_readers=[reader])
-metrics.set_meter_provider(provider)
-
-meter = metrics.get_meter(__name__)
-
-agent_create_total = meter.create_counter(
+agent_create_total = Counter(
     "agent_create_total",
-    description="Total number of agents created"
+    "Total number of agents created"
 )
 
-agent_jobs_total = meter.create_counter(
+agent_active_count = Gauge(
+    "agent_active_count",
+    "Current number of active agents"
+)
+
+agent_jobs_total = Counter(
     "agent_jobs_total",
-    description="Total number of agent jobs executed"
+    "Total number of agent jobs executed",
+    labelnames=["status"]
 )
 
-agent_job_duration = meter.create_histogram(
+agent_job_duration = Histogram(
     "agent_job_duration_ms",
-    description="Duration of agent jobs in milliseconds"
+    "Duration of agent jobs in milliseconds",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, float("inf"))
+)
+
+agent_mcp_request_duration = Histogram(
+    "agent_mcp_request_duration_ms",
+    "Duration of MCP requests in milliseconds",
+    buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, float("inf"))
 )
 
 class Agent(BaseModel):
@@ -83,6 +83,15 @@ con.commit()
 
 con.close()
 
+
+def update_agent_active_count():
+    con = sqlite3.connect('agents.db')
+    c = con.cursor()
+    c.execute("SELECT COUNT(*) FROM agents")
+    count = c.fetchone()[0]
+    con.close()
+    agent_active_count.set(count)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.info("Starting up Agent API...")
@@ -95,11 +104,13 @@ async def lifespan(app: FastAPI):
         interval_seconds = max(1, interval_ms / 1000)
         threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
     con.close()
+    update_agent_active_count()
     logging.info(f"Rescheduled {len(rows)} agents on startup")
     yield
     logging.info("Shutting down Agent API...")
 
 app = FastAPI(lifespan=lifespan)
+app.mount("/metrics", make_asgi_app())
 
 app.add_middleware(
     CORSMiddleware,
@@ -150,6 +161,7 @@ def create_agent(agent: Agent):
     if not agent.listenTopic:
         threading.Timer(0, agent_task, args=[agent_id]).start()
     agent_create_total.add(1)
+    update_agent_active_count()
     return {"id": agent_id}
 
 @app.get("/agents")
@@ -228,6 +240,7 @@ def delete_agent(agent_id: str):
     c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
     con.commit()
     con.close()
+    update_agent_active_count()
     return {"message": f"Agent with id {agent_id} deleted"}
 
 @app.delete("/agents")
@@ -238,9 +251,11 @@ def delete_all_agents():
     c.execute("DELETE FROM agents")
     con.commit()
     con.close()
+    update_agent_active_count()
     return {"message": "All agents deleted"}
 
 def agent_task(agent_id):
+    task_start_time = time.time()
     # 1. test if agent still exists
 
     con = sqlite3.connect('agents.db')
@@ -254,6 +269,7 @@ def agent_task(agent_id):
 
     if agent[5]:  # paused is True
         logging.info(f"Agent {agent_id} is paused, skipping execution")
+        agent_jobs_total.labels(status="paused").inc()
         interval_seconds = max(1, agent[1] / 1000)
         threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
         con.close()
@@ -262,16 +278,22 @@ def agent_task(agent_id):
     # 2. Make the POST request to the MCP with the agent's text and purposes
 
     if not send_msg(agent_id, agent, c, con):
+        agent_jobs_total.labels(status="failed").inc()
+        agent_job_duration.observe((time.time() - task_start_time) * 1000)
         con.close()
         return
     
     # 3. Reschedule the task if it's not a run-once agent
+
+    agent_jobs_total.labels(status="success").inc()
+    agent_job_duration.observe((time.time() - task_start_time) * 1000)
 
     if agent[2]:  # runOnce is True
         c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
         c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
         con.commit()
         con.close()
+        update_agent_active_count()
         logging.info(f"Run-once Agent {agent_id} deleted after execution")
     else:
         interval_seconds = max(1, agent[1] / 1000)
@@ -289,18 +311,22 @@ def send_msg(agent_id, agent, c, con, pretext=""):
     con.commit()
     
     start_time = time.time()
-    x = requests.post(MCP_URL, json=data)
+    try:
+        x = requests.post(MCP_URL, json=data)
+        x.raise_for_status()
+    except requests.RequestException as exc:
+        logging.exception(f"Agent {agent_id} MCP request failed: {exc}")
+        return False
     duration_ms = (time.time() - start_time) * 1000
 
-    agent_job_duration.record(duration_ms, {"agent_id": agent_id})
-    agent_jobs_total.add(1)
+    agent_mcp_request_duration.observe(duration_ms)
     # agent could have been deleted while the request was in-flight, so check again if it still exists before trying to log the response
     c.execute("SELECT id, intervalMs, runOnce, text, purposes, listenTopic FROM agents WHERE id = ?", (agent_id,))
     agent = c.fetchone()
     if not agent:
         return False
 
-    res = json.loads(x.text)
+    res = x.json()
     c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", res["response"]))
     con.commit()
 

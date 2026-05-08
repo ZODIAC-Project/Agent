@@ -6,6 +6,7 @@
 `POST /agents` - create a new agent with the passed arguments  
 `DELETE /agents` - delete all agents  
 `DELETE /agents/{agent-id}` - delete the agent with the id `{agent-id}`
+`GET /metrics` - Prometheus metrics endpoint for the agent manager
 
 **run locally:**  
 `uv run python -m uvicorn main:app --host 0.0.0.0 --port 30086`
