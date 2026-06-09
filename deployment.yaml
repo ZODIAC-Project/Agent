@@ -46,3 +46,4 @@ spec:
       protocol: TCP
       port: 30086
       targetPort: 30086
+      nodePort: 30086
