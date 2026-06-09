@@ -15,7 +15,7 @@
 
 create a new agent
 ```
-curl -X POST "http://127.0.0.1:8000/agents" -H "Content-Type: application/json" -d '{
+curl -X POST "http://127.0.0.1:30086/agents" -H "Content-Type: application/json" -d '{
     "intervalMs": 5000,
     "runOnce": true,
     "text": "what is your favourite color?",
@@ -26,5 +26,5 @@ curl -X POST "http://127.0.0.1:8000/agents" -H "Content-Type: application/json" 
 
 get all agents
 ```
-curl "http://127.0.0.1:8000/agents"
+curl "http://127.0.0.1:30086/agents"
 ```

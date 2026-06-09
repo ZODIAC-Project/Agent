@@ -124,8 +124,7 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-@app.post("/agents")
-def create_agent(agent: Agent):
+def _create_agent(agent: Agent):
     if not agent.listenTopic and not agent.intervalMs:
         raise HTTPException(status_code=400, detail="Either intervalMs or listenTopic must be set")
     
@@ -163,6 +162,14 @@ def create_agent(agent: Agent):
     agent_create_total.inc()
     update_agent_active_count()
     return {"id": agent_id}
+
+@app.post("/agents")
+def create_agent(agent: Agent):
+    return _create_agent(agent)
+
+@app.post("/agent")
+def create_agent_legacy(agent: Agent):
+    return _create_agent(agent)
 
 @app.get("/agents")
 def get_agents():
