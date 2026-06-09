@@ -33,10 +33,16 @@ metadata:
   namespace: zodiac
   name: agent-api
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: agent-api
   ports:
-    - protocol: TCP
+    - name: http-legacy
+      protocol: TCP
+      port: 3000
+      targetPort: 30086
+      nodePort: 30085
+    - name: http-agent
+      protocol: TCP
       port: 30086
       targetPort: 30086
