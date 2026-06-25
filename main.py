@@ -372,9 +372,9 @@ async def websocket_agents(websocket: WebSocket):
 @app.websocket("/agents/{agent_id}/history")
 async def websocket_agent_history(websocket: WebSocket, agent_id: str):
     await websocket.accept()
-    while True:
-        try:
-            with sqlite3.connect('agents.db') as con:   # closes even if send throws
+    try:
+        while True:
+            with sqlite3.connect('agents.db') as con:
                 c = con.cursor()
                 c.execute(
                     "SELECT timestamp, type, message FROM history "
@@ -387,8 +387,9 @@ async def websocket_agent_history(websocket: WebSocket, agent_id: str):
                 ]
 
             await websocket.send_text(json.dumps(entries))
-        except WebSocketDisconnect:
-            break
-        except Exception as e:
-            logging.error(f"Websocket error: {e}")
-            break
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
+        pass  # client left cleanly, nothing to log
+    except Exception as e:
+        logging.error(f"Websocket error: {e}")
