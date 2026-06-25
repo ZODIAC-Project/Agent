@@ -16,6 +16,7 @@ import json
 import os
 
 MCP_URL = os.getenv("MCP_URL", "http://130.149.158.32:30084/chat")
+STREAM_MANAGER_URL = os.getenv("STREAM_MANAGER_URL", "http://130.149.158.32:30002")
 
 agent_create_total = Counter(
     "agent_create_total",
@@ -155,7 +156,21 @@ def _create_agent(agent: Agent):
     )
 
     con.commit()
-    con.close()
+    if agent.listenTopic:
+        try:
+            requests.post(
+                f"{STREAM_MANAGER_URL}/subscribe",
+                json={
+                    "session_id": agent_id,
+                    "topic": agent.listenTopic,
+                    "purpose": agent.purposes[0] if agent.purposes else "default",
+                },
+                timeout=5.0,
+            )
+            logging.info(f"Agent {agent_id} auto-subscribed to {agent.listenTopic}")
+        except Exception as e:
+            logging.warning(f"Agent {agent_id} auto-subscribe failed: {e}")
+        con.close()
 
     if not agent.listenTopic:
         threading.Timer(0, agent_task, args=[agent_id]).start()
