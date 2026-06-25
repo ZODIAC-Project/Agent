@@ -1,5 +1,5 @@
 # web server
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from contextlib import asynccontextmanager
@@ -374,21 +374,21 @@ async def websocket_agent_history(websocket: WebSocket, agent_id: str):
     await websocket.accept()
     while True:
         try:
-            con = sqlite3.connect('agents.db')
-            c = con.cursor()
-            c.execute("SELECT agent_id, timestamp, type, message FROM history WHERE agent_id = ? ORDER BY id DESC LIMIT 50", (agent_id,))
-            rows = c.fetchall()
-            entries = []
-            for row in rows:
-                entries.append({
-                    "timestamp": row[1],
-                    "type": row[2],
-                    "message": row[3]
-                })
-            entries = entries[::-1]
+            with sqlite3.connect('agents.db') as con:   # closes even if send throws
+                c = con.cursor()
+                c.execute(
+                    "SELECT timestamp, type, message FROM history "
+                    "WHERE agent_id = ? ORDER BY id DESC LIMIT 50",
+                    (agent_id,)
+                )
+                entries = [
+                    {"timestamp": r[0], "type": r[1], "message": r[2]}
+                    for r in reversed(c.fetchall())
+                ]
+
             await websocket.send_text(json.dumps(entries))
-            con.close()
-            await asyncio.sleep(1) # send updates every second
+        except WebSocketDisconnect:
+            break
         except Exception as e:
             logging.error(f"Websocket error: {e}")
             break
