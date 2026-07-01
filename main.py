@@ -225,6 +225,7 @@ def modify_agent(agent_id: str, options: dict):
             logging.info(f"Event-Agent {agent_id} is paused, skipping execution")
         if not send_msg(agent_id, agent, c, con, pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} "):
             con.close()
+            return {"message": f"Agent with id {agent_id} not updated (send failed or agent removed)"}
 
     con.commit()
     con.close()
