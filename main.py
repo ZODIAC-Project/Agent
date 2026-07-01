@@ -282,6 +282,12 @@ def delete_all_agents():
     c.execute("DELETE FROM agents")
     con.commit()
     con.close()
+    
+    try:
+        requests.post(f"{STREAM_MANAGER_URL}/clear_all", timeout=5.0)
+    except requests.RequestException as e:
+        logging.warning(f"Failed to clear all stream manager sessions: {e}")
+
     update_agent_active_count()
     return {"message": "All agents deleted"}
 
