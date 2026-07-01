@@ -263,6 +263,14 @@ def delete_agent(agent_id: str):
     c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
     con.commit()
     con.close()
+    
+    # tear down any stream-manager subscription for this agent, if it had one
+    if agent[7]:  # listenTopic column
+        try:
+            requests.post(f"{STREAM_MANAGER_URL}/cleanup/{agent_id}", timeout=5.0)
+        except requests.RequestException as e:
+            logging.warning(f"Failed to clean up stream manager session for agent {agent_id}: {e}")
+
     update_agent_active_count()
     return {"message": f"Agent with id {agent_id} deleted"}
 
