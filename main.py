@@ -1,9 +1,10 @@
 # web server
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
+from otel_setup import configure_tracing, current_trace_id, get_tracer, inject_trace_headers, start_incoming_span
 # other
 from uuid import UUID, uuid4
 import threading
@@ -14,6 +15,9 @@ import asyncio
 import time
 import json
 import os
+
+configure_tracing()
+tracer = get_tracer(__name__)
 
 MCP_URL = os.getenv("MCP_URL", "http://130.149.158.32:30084/chat")
 STREAM_MANAGER_URL = os.getenv("STREAM_MANAGER_URL", "http://130.149.158.32:30002")
@@ -122,8 +126,9 @@ app.add_middleware(
 )
 
 @app.get("/health")
-def health():
-    return {"status": "ok"}
+def health(request: Request):
+    with start_incoming_span(tracer, "agent.http.health", request.headers):
+        return {"status": "ok"}
 
 def _create_agent(agent: Agent):
     if not agent.listenTopic and not agent.intervalMs:
@@ -165,6 +170,7 @@ def _create_agent(agent: Agent):
                     "topic": agent.listenTopic,
                     "purpose": agent.purposes[0] if agent.purposes else "default",
                 },
+                headers=inject_trace_headers(),
                 timeout=5.0,
             )
             logging.info(f"Agent {agent_id} auto-subscribed to {agent.listenTopic}")
@@ -179,12 +185,22 @@ def _create_agent(agent: Agent):
     return {"id": agent_id}
 
 @app.post("/agents")
-def create_agent(agent: Agent):
-    return _create_agent(agent)
+def create_agent(agent: Agent, request: Request):
+    with start_incoming_span(tracer, "agent.http.create_agent", request.headers) as span:
+        span.set_attribute("gen_ai.agent.name", "zodiac-agent")
+        span.set_attribute("zodiac.trace_id", current_trace_id())
+        if agent.purposes:
+            span.set_attribute("zodiac.purpose", agent.purposes[0])
+            span.set_attribute("zodiac.purposes", ",".join(agent.purposes))
+        return _create_agent(agent)
 
 @app.post("/agent")
-def create_agent_legacy(agent: Agent):
-    return _create_agent(agent)
+def create_agent_legacy(agent: Agent, request: Request):
+    with start_incoming_span(tracer, "agent.http.create_agent_legacy", request.headers) as span:
+        if agent.purposes:
+            span.set_attribute("zodiac.purpose", agent.purposes[0])
+            span.set_attribute("zodiac.purposes", ",".join(agent.purposes))
+        return _create_agent(agent)
 
 @app.get("/agents")
 def get_agents():
@@ -208,28 +224,31 @@ def get_agents():
     return agents
 
 @app.post("/agents/{agent_id}")
-def modify_agent(agent_id: str, options: dict):
-    con = sqlite3.connect('agents.db')
-    c = con.cursor()
-    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
-    agent = c.fetchone()
-    if not agent:
-        con.close()
-        raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
-    if "pause" in options and options["pause"]:
-        c.execute("UPDATE agents SET paused = 1 WHERE id = ?", (agent_id,))
-    if "pause" in options and not options["pause"]:
-        c.execute("UPDATE agents SET paused = 0 WHERE id = ?", (agent_id,))
-    if "datapoint" in options:
-        if agent[5]: # paused is True
-            logging.info(f"Event-Agent {agent_id} is paused, skipping execution")
-        if not send_msg(agent_id, agent, c, con, pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} "):
+def modify_agent(agent_id: str, options: dict, request: Request):
+    with start_incoming_span(tracer, "agent.http.modify_agent", request.headers) as span:
+        span.set_attribute("gen_ai.agent.name", "zodiac-agent")
+        span.set_attribute("zodiac.agent_id", agent_id)
+        con = sqlite3.connect('agents.db')
+        c = con.cursor()
+        c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
+        agent = c.fetchone()
+        if not agent:
             con.close()
-            return {"message": f"Agent with id {agent_id} not updated (send failed or agent removed)"}
+            raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
+        if "pause" in options and options["pause"]:
+            c.execute("UPDATE agents SET paused = 1 WHERE id = ?", (agent_id,))
+        if "pause" in options and not options["pause"]:
+            c.execute("UPDATE agents SET paused = 0 WHERE id = ?", (agent_id,))
+        if "datapoint" in options:
+            if agent[5]: # paused is True
+                logging.info(f"Event-Agent {agent_id} is paused, skipping execution")
+            if not send_msg(agent_id, agent, c, con, pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} "):
+                con.close()
+                return {"message": f"Agent with id {agent_id} not updated (send failed or agent removed)"}
 
-    con.commit()
-    con.close()
-    return {"message": f"Agent with id {agent_id} updated"}
+        con.commit()
+        con.close()
+        return {"message": f"Agent with id {agent_id} updated"}
 
 
 @app.get("/agents/{agent_id}/history")
@@ -250,97 +269,113 @@ def get_agent_history(agent_id: str):
     return history
 
 @app.delete("/agents/{agent_id}")
-def delete_agent(agent_id: str):
-    con = sqlite3.connect('agents.db')
-    c = con.cursor()
-    # check if agent exists
-    c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
-    agent = c.fetchone()
-    if not agent:
-        con.close()
-        raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
-    c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
-    c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
-    con.commit()
-    con.close()
-    
-    # tear down any stream-manager subscription for this agent, if it had one
-    if agent[7]:  # listenTopic column
-        try:
-            requests.post(f"{STREAM_MANAGER_URL}/cleanup/{agent_id}", timeout=5.0)
-        except requests.RequestException as e:
-            logging.warning(f"Failed to clean up stream manager session for agent {agent_id}: {e}")
-
-    update_agent_active_count()
-    return {"message": f"Agent with id {agent_id} deleted"}
-
-@app.delete("/agents")
-def delete_all_agents():
-    con = sqlite3.connect('agents.db')
-    c = con.cursor()
-    c.execute("DELETE FROM history")
-    c.execute("DELETE FROM agents")
-    con.commit()
-    con.close()
-    
-    try:
-        requests.post(f"{STREAM_MANAGER_URL}/clear_all", timeout=5.0)
-    except requests.RequestException as e:
-        logging.warning(f"Failed to clear all stream manager sessions: {e}")
-
-    update_agent_active_count()
-    return {"message": "All agents deleted"}
-
-def agent_task(agent_id):
-    task_start_time = time.time()
-    # 1. test if agent still exists
-
-    con = sqlite3.connect('agents.db')
-    c = con.cursor()
-    c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
-    agent = c.fetchone()
-    if not agent:
-        con.close()
-        return
-    logging.info(f"Running task for agent {agent_id}")
-
-    if agent[5]:  # paused is True
-        logging.info(f"Agent {agent_id} is paused, skipping execution")
-        agent_jobs_total.labels(status="paused").inc()
-        interval_seconds = max(1, agent[1] / 1000)
-        threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
-        con.close()
-        return
-
-    # 2. Make the POST request to the MCP with the agent's text and purposes
-
-    if not send_msg(agent_id, agent, c, con):
-        agent_jobs_total.labels(status="failed").inc()
-        agent_job_duration.observe((time.time() - task_start_time) * 1000)
-        con.close()
-        return
-    
-    # 3. Reschedule the task if it's not a run-once agent
-
-    agent_jobs_total.labels(status="success").inc()
-    agent_job_duration.observe((time.time() - task_start_time) * 1000)
-
-    if agent[2]:  # runOnce is True
+def delete_agent(agent_id: str, request: Request):
+    with start_incoming_span(tracer, "agent.http.delete_agent", request.headers):
+        con = sqlite3.connect('agents.db')
+        c = con.cursor()
+        # check if agent exists
+        c.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+        agent = c.fetchone()
+        if not agent:
+            con.close()
+            raise HTTPException(status_code=404, detail=f"Agent with id {agent_id} not found")
         c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
         c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
         con.commit()
         con.close()
+
+        # tear down any stream-manager subscription for this agent, if it had one
+        if agent[7]:  # listenTopic column
+            try:
+                requests.post(
+                    f"{STREAM_MANAGER_URL}/cleanup/{agent_id}",
+                    headers=inject_trace_headers(),
+                    timeout=5.0,
+                )
+            except requests.RequestException as e:
+                logging.warning(f"Failed to clean up stream manager session for agent {agent_id}: {e}")
+
         update_agent_active_count()
-        logging.info(f"Run-once Agent {agent_id} deleted after execution")
-    else:
-        interval_seconds = max(1, agent[1] / 1000)
-        threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
-    con.close()
+        return {"message": f"Agent with id {agent_id} deleted"}
+
+@app.delete("/agents")
+def delete_all_agents(request: Request):
+    with start_incoming_span(tracer, "agent.http.delete_all_agents", request.headers):
+        con = sqlite3.connect('agents.db')
+        c = con.cursor()
+        c.execute("DELETE FROM history")
+        c.execute("DELETE FROM agents")
+        con.commit()
+        con.close()
+        
+        try:
+            requests.post(
+                f"{STREAM_MANAGER_URL}/clear_all",
+                headers=inject_trace_headers(),
+                timeout=5.0,
+            )
+        except requests.RequestException as e:
+            logging.warning(f"Failed to clear all stream manager sessions: {e}")
+
+        update_agent_active_count()
+        return {"message": "All agents deleted"}
+
+def agent_task(agent_id):
+    task_start_time = time.time()
+    with tracer.start_as_current_span("agent.job.run") as span:
+        span.set_attribute("gen_ai.agent.name", "zodiac-agent")
+        span.set_attribute("gen_ai.workflow.name", "scheduled_agent_execution")
+        span.set_attribute("zodiac.agent_id", agent_id)
+        # 1. test if agent still exists
+        con = sqlite3.connect('agents.db')
+        c = con.cursor()
+        c.execute("SELECT id, intervalMs, runOnce, text, purposes, paused, listenTopic FROM agents WHERE id = ?", (agent_id,))
+        agent = c.fetchone()
+        if not agent:
+            con.close()
+            return
+        logging.info(f"Running task for agent {agent_id}")
+        purposes = json.loads(agent[4]) if agent[4] else []
+        if purposes:
+            span.set_attribute("zodiac.purpose", purposes[0])
+            span.set_attribute("zodiac.purposes", ",".join(purposes))
+
+        if agent[5]:  # paused is True
+            logging.info(f"Agent {agent_id} is paused, skipping execution")
+            agent_jobs_total.labels(status="paused").inc()
+            interval_seconds = max(1, agent[1] / 1000)
+            threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+            con.close()
+            return
+
+        # 2. Make the POST request to the MCP with the agent's text and purposes
+        if not send_msg(agent_id, agent, c, con):
+            agent_jobs_total.labels(status="failed").inc()
+            agent_job_duration.observe((time.time() - task_start_time) * 1000)
+            con.close()
+            return
+        
+        # 3. Reschedule the task if it's not a run-once agent
+        agent_jobs_total.labels(status="success").inc()
+        agent_job_duration.observe((time.time() - task_start_time) * 1000)
+
+        if agent[2]:  # runOnce is True
+            c.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+            c.execute("DELETE FROM history WHERE agent_id = ?", (agent_id,))
+            con.commit()
+            con.close()
+            update_agent_active_count()
+            logging.info(f"Run-once Agent {agent_id} deleted after execution")
+        else:
+            interval_seconds = max(1, agent[1] / 1000)
+            threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+            con.close()
 
 def send_msg(agent_id, agent, c, con, pretext=""):
+    purposes = json.loads(agent[4])
     data = {
         "message": pretext + agent[3],
-        "purposes": json.loads(agent[4]),
+        "purposes": purposes,
         "session_id": agent_id
     }
 
@@ -349,7 +384,17 @@ def send_msg(agent_id, agent, c, con, pretext=""):
     
     start_time = time.time()
     try:
-        x = requests.post(MCP_URL, json=data)
+        with tracer.start_as_current_span("agent.mcp.request") as span:
+            span.set_attribute("gen_ai.agent.name", "zodiac-agent")
+            span.set_attribute("gen_ai.workflow.name", "scheduled_agent_execution")
+            span.set_attribute("gen_ai.tool.type", "function")
+            span.set_attribute("server.address", MCP_URL)
+            span.set_attribute("zodiac.agent_id", agent_id)
+            if purposes:
+                span.set_attribute("zodiac.purpose", purposes[0])
+                span.set_attribute("zodiac.purposes", ",".join(purposes))
+            x = requests.post(MCP_URL, json=data, headers=inject_trace_headers(), timeout=30)
+            span.set_attribute("http.status_code", x.status_code)
         x.raise_for_status()
     except requests.RequestException as exc:
         logging.exception(f"Agent {agent_id} MCP request failed: {exc}")
