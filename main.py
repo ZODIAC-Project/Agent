@@ -405,7 +405,7 @@ def send_msg(agent_id, agent, c, con, pretext=""):
         "session_id": agent_id
     }
 
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", pretext + agent[3]))
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", pretext + agent[3]))
     con.commit()
     
     start_time = time.time()
@@ -435,7 +435,7 @@ def send_msg(agent_id, agent, c, con, pretext=""):
         return False
 
     res = x.json()
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", res["response"]))
+    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", res["response"]))
     con.commit()
 
     logging.info(f"Agent {agent_id} task response: {x.text}")
