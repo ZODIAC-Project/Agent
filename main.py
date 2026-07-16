@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from contextlib import asynccontextmanager
+from opentelemetry import context as otel_context
 from pydantic import BaseModel
 from otel_setup import configure_tracing, current_trace_id, get_tracer, inject_trace_headers, start_incoming_span
 # other
@@ -97,6 +98,27 @@ def update_agent_active_count():
     con.close()
     agent_active_count.set(count)
 
+
+def _run_agent_task_with_context(agent_id, parent_context):
+    token = otel_context.attach(parent_context)
+    try:
+        agent_task(agent_id)
+    finally:
+        otel_context.detach(token)
+
+
+def _schedule_agent(agent_id, delay_seconds, parent_context=None):
+    if parent_context is None:
+        timer = threading.Timer(delay_seconds, agent_task, args=[agent_id])
+    else:
+        timer = threading.Timer(
+            delay_seconds,
+            _run_agent_task_with_context,
+            args=[agent_id, parent_context],
+        )
+    timer.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.info("Starting up Agent API...")
@@ -107,7 +129,7 @@ async def lifespan(app: FastAPI):
     for row in rows:
         agent_id, interval_ms, run_once = row
         interval_seconds = max(1, interval_ms / 1000)
-        threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+        _schedule_agent(agent_id, interval_seconds)
     con.close()
     update_agent_active_count()
     logging.info(f"Rescheduled {len(rows)} agents on startup")
@@ -179,7 +201,11 @@ def _create_agent(agent: Agent):
         con.close()
 
     if not agent.listenTopic:
-        threading.Timer(0, agent_task, args=[agent_id]).start()
+        _schedule_agent(
+            agent_id,
+            0,
+            parent_context=otel_context.get_current(),
+        )
     agent_create_total.inc()
     update_agent_active_count()
     return {"id": agent_id}
@@ -344,7 +370,7 @@ def agent_task(agent_id):
             logging.info(f"Agent {agent_id} is paused, skipping execution")
             agent_jobs_total.labels(status="paused").inc()
             interval_seconds = max(1, agent[1] / 1000)
-            threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+            _schedule_agent(agent_id, interval_seconds)
             con.close()
             return
 
@@ -368,7 +394,7 @@ def agent_task(agent_id):
             logging.info(f"Run-once Agent {agent_id} deleted after execution")
         else:
             interval_seconds = max(1, agent[1] / 1000)
-            threading.Timer(interval_seconds, agent_task, args=[agent_id]).start()
+            _schedule_agent(agent_id, interval_seconds)
             con.close()
 
 def send_msg(agent_id, agent, c, con, pretext=""):
