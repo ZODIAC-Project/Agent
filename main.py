@@ -164,7 +164,7 @@ def _create_agent(agent: Agent):
     interval_ms = None
     if agent.listenTopic: # event-based agent
         listen_topic = agent.listenTopic
-    else: # timed agent
+    elif agent.intervalMs is not None: # timed agent
         interval_ms = max(1000, agent.intervalMs)  # Ensure minimum interval of 1 second
 
     # Insert the new agent into the database
