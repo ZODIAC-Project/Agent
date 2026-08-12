@@ -419,7 +419,7 @@ def send_msg(agent_id, agent, c, con, pretext=""):
             if purposes:
                 span.set_attribute("zodiac.purpose", purposes[0])
                 span.set_attribute("zodiac.purposes", ",".join(purposes))
-            x = requests.post(MCP_URL, json=data, headers=inject_trace_headers(), timeout=30)
+            x = requests.post(MCP_URL, json=data, headers=inject_trace_headers(), timeout=120)
             span.set_attribute("http.status_code", x.status_code)
         x.raise_for_status()
     except requests.RequestException as exc:
