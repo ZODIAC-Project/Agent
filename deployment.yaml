@@ -24,6 +24,14 @@ spec:
           env:
             - name: MCP_URL
               value: http://mcp-client-service:8000/chat
+            - name: STREAM_MANAGER_URL
+              value: http://stream-manager:8002
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.zodiac.svc.cluster.local:4318
+            - name: OTEL_SERVICE_NAME
+              value: agent-api
+            - name: OTEL_SERVICE_NAMESPACE
+              value: zodiac
           ports:
             - containerPort: 30086
 ---
