@@ -349,7 +349,7 @@ def send_msg(agent_id, agent, c, con, pretext=""):
     
     start_time = time.time()
     try:
-        x = requests.post(MCP_URL, json=data)
+        x = requests.post(MCP_URL, json=data, timeout=(5.0, 120.0))  # connect timeout of 5s, read timeout of 120s
         x.raise_for_status()
     except requests.RequestException as exc:
         logging.exception(f"Agent {agent_id} MCP request failed: {exc}")
