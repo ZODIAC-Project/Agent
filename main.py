@@ -3,7 +3,9 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from contextlib import asynccontextmanager
-from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace import Link, Status, StatusCode
 from pydantic import BaseModel
 from otel_setup import configure_tracing, current_trace_id, get_tracer, inject_trace_headers, start_incoming_span
 # other
@@ -22,6 +24,10 @@ tracer = get_tracer(__name__)
 
 MCP_URL = os.getenv("MCP_URL", "http://130.149.158.32:30084/chat")
 STREAM_MANAGER_URL = os.getenv("STREAM_MANAGER_URL", "http://130.149.158.32:30002")
+# A normal agent run can include several model calls and tool invocations.
+# Keep this above the expected end-to-end duration to avoid ending its parent
+# span while the MCP client is still processing the same request.
+MCP_REQUEST_TIMEOUT_SECONDS = float(os.getenv("MCP_REQUEST_TIMEOUT_SECONDS", "300"))
 
 agent_create_total = Counter(
     "agent_create_total",
@@ -99,23 +105,14 @@ def update_agent_active_count():
     agent_active_count.set(count)
 
 
-def _run_agent_task_with_context(agent_id, parent_context):
-    token = otel_context.attach(parent_context)
-    try:
-        agent_task(agent_id)
-    finally:
-        otel_context.detach(token)
-
-
-def _schedule_agent(agent_id, delay_seconds, parent_context=None):
-    if parent_context is None:
-        timer = threading.Timer(delay_seconds, agent_task, args=[agent_id])
-    else:
-        timer = threading.Timer(
-            delay_seconds,
-            _run_agent_task_with_context,
-            args=[agent_id, parent_context],
-        )
+def _schedule_agent(agent_id, delay_seconds, enqueue_context=None):
+    # A scheduled run is a new trace. A link preserves causality without making a
+    # multi-minute job look like it is still part of the short HTTP request.
+    timer = threading.Timer(
+        delay_seconds,
+        agent_task,
+        args=[agent_id, enqueue_context],
+    )
     timer.start()
 
 
@@ -201,19 +198,21 @@ def _create_agent(agent: Agent):
         con.close()
 
     if not agent.listenTopic:
-        _schedule_agent(
-            agent_id,
-            0,
-            parent_context=otel_context.get_current(),
-        )
+        with tracer.start_as_current_span("agent.create.enqueue") as enqueue_span:
+            enqueue_span.set_attribute("zodiac.agent_id", agent_id)
+            enqueue_span.set_attribute("job.trigger", "agent_created")
+            enqueue_span.set_attribute("job.queue", "threading_timer")
+            _schedule_agent(agent_id, 0, enqueue_span.get_span_context())
     agent_create_total.inc()
     update_agent_active_count()
     return {"id": agent_id}
 
 @app.post("/agents")
 def create_agent(agent: Agent, request: Request):
-    with start_incoming_span(tracer, "agent.http.create_agent", request.headers) as span:
+    with start_incoming_span(tracer, "POST /agents", request.headers) as span:
         span.set_attribute("gen_ai.agent.name", "zodiac-agent")
+        span.set_attribute("http.request.method", request.method)
+        span.set_attribute("url.path", request.url.path)
         span.set_attribute("zodiac.trace_id", current_trace_id())
         if agent.purposes:
             span.set_attribute("zodiac.purpose", agent.purposes[0])
@@ -222,7 +221,7 @@ def create_agent(agent: Agent, request: Request):
 
 @app.post("/agent")
 def create_agent_legacy(agent: Agent, request: Request):
-    with start_incoming_span(tracer, "agent.http.create_agent_legacy", request.headers) as span:
+    with start_incoming_span(tracer, "POST /agent", request.headers) as span:
         if agent.purposes:
             span.set_attribute("zodiac.purpose", agent.purposes[0])
             span.set_attribute("zodiac.purposes", ",".join(agent.purposes))
@@ -268,7 +267,25 @@ def modify_agent(agent_id: str, options: dict, request: Request):
         if "datapoint" in options:
             if agent[5]: # paused is True
                 logging.info(f"Event-Agent {agent_id} is paused, skipping execution")
-            if not send_msg(agent_id, agent, c, con, pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} "):
+            source_context = trace.get_current_span().get_span_context()
+            links = [Link(source_context)] if source_context.is_valid else []
+            # Event delivery is a new run, linked to the receiving HTTP request.
+            with tracer.start_as_current_span(
+                "agent.job.run", context=Context(), links=links
+            ) as job_span:
+                run_id = str(uuid4())
+                job_span.set_attribute("zodiac.agent_id", agent_id)
+                job_span.set_attribute("agent.run.id", run_id)
+                job_span.set_attribute("job.trigger", "mqtt_event")
+                sent = send_msg(
+                    agent_id,
+                    agent,
+                    c,
+                    con,
+                    pretext=f"New MQTT-Message for topic {agent[6]}: {options['datapoint']} ",
+                    run_id=run_id,
+                )
+            if not sent:
                 con.close()
                 return {"message": f"Agent with id {agent_id} not updated (send failed or agent removed)"}
 
@@ -346,12 +363,16 @@ def delete_all_agents(request: Request):
         update_agent_active_count()
         return {"message": "All agents deleted"}
 
-def agent_task(agent_id):
+def agent_task(agent_id, enqueue_context=None):
     task_start_time = time.time()
-    with tracer.start_as_current_span("agent.job.run") as span:
+    links = [Link(enqueue_context)] if enqueue_context and enqueue_context.is_valid else []
+    with tracer.start_as_current_span("agent.job.run", links=links) as span:
+        run_id = str(uuid4())
         span.set_attribute("gen_ai.agent.name", "zodiac-agent")
         span.set_attribute("gen_ai.workflow.name", "scheduled_agent_execution")
         span.set_attribute("zodiac.agent_id", agent_id)
+        span.set_attribute("agent.run.id", run_id)
+        span.set_attribute("job.trigger", "scheduled")
         # 1. test if agent still exists
         con = sqlite3.connect('agents.db')
         c = con.cursor()
@@ -375,7 +396,7 @@ def agent_task(agent_id):
             return
 
         # 2. Make the POST request to the MCP with the agent's text and purposes
-        if not send_msg(agent_id, agent, c, con):
+        if not send_msg(agent_id, agent, c, con, run_id=run_id):
             agent_jobs_total.labels(status="failed").inc()
             agent_job_duration.observe((time.time() - task_start_time) * 1000)
             con.close()
@@ -397,7 +418,7 @@ def agent_task(agent_id):
             _schedule_agent(agent_id, interval_seconds)
             con.close()
 
-def send_msg(agent_id, agent, c, con, pretext=""):
+def send_msg(agent_id, agent, c, con, pretext="", run_id=None):
     purposes = json.loads(agent[4])
     data = {
         "message": pretext + agent[3],
@@ -410,19 +431,32 @@ def send_msg(agent_id, agent, c, con, pretext=""):
     
     start_time = time.time()
     try:
-        with tracer.start_as_current_span("agent.mcp.request") as span:
+        with tracer.start_as_current_span("agent.chat.request") as span:
             span.set_attribute("gen_ai.agent.name", "zodiac-agent")
             span.set_attribute("gen_ai.workflow.name", "scheduled_agent_execution")
-            span.set_attribute("gen_ai.tool.type", "function")
+            span.set_attribute("gen_ai.operation.name", "chat")
             span.set_attribute("server.address", MCP_URL)
             span.set_attribute("zodiac.agent_id", agent_id)
+            if run_id:
+                span.set_attribute("agent.run.id", run_id)
             if purposes:
                 span.set_attribute("zodiac.purpose", purposes[0])
                 span.set_attribute("zodiac.purposes", ",".join(purposes))
-            x = requests.post(MCP_URL, json=data, headers=inject_trace_headers(), timeout=120)
-            span.set_attribute("http.status_code", x.status_code)
-        x.raise_for_status()
+            span.set_attribute("input.message.length", len(data["message"]))
+            span.set_attribute("http.request.timeout_ms", MCP_REQUEST_TIMEOUT_SECONDS * 1000)
+            x = requests.post(
+                MCP_URL,
+                json=data,
+                headers=inject_trace_headers(
+                    {"x-zodiac-agent-run-id": run_id} if run_id else None
+                ),
+                timeout=MCP_REQUEST_TIMEOUT_SECONDS,
+            )
+            span.set_attribute("http.response.status_code", x.status_code)
+            x.raise_for_status()
     except requests.RequestException as exc:
+        span.record_exception(exc)
+        span.set_status(Status(StatusCode.ERROR, str(exc)))
         logging.exception(f"Agent {agent_id} MCP request failed: {exc}")
         return False
     duration_ms = (time.time() - start_time) * 1000
@@ -435,8 +469,17 @@ def send_msg(agent_id, agent, c, con, pretext=""):
         return False
 
     res = x.json()
-    c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "outgoing", res["response"]))
-    con.commit()
+    with tracer.start_as_current_span("agent.result.persist") as persist_span:
+        persist_span.set_attribute("zodiac.agent_id", agent_id)
+        if run_id:
+            persist_span.set_attribute("agent.run.id", run_id)
+        persist_span.set_attribute("db.system", "sqlite")
+        persist_span.set_attribute("db.operation.name", "insert")
+        c.execute(
+            "INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)",
+            (agent_id, int(time.time()), "outgoing", res["response"]),
+        )
+        con.commit()
 
     logging.info(f"Agent {agent_id} task response: {x.text}")
     return True
