@@ -27,7 +27,7 @@ STREAM_MANAGER_URL = os.getenv("STREAM_MANAGER_URL", "http://130.149.158.32:3000
 # A normal agent run can include several model calls and tool invocations.
 # Keep this above the expected end-to-end duration to avoid ending its parent
 # span while the MCP client is still processing the same request.
-MCP_REQUEST_TIMEOUT_SECONDS = float(os.getenv("MCP_REQUEST_TIMEOUT_SECONDS", "300"))
+MCP_REQUEST_TIMEOUT_SECONDS = float(os.getenv("MCP_REQUEST_TIMEOUT_SECONDS", "600"))
 
 agent_create_total = Counter(
     "agent_create_total",
@@ -397,6 +397,7 @@ def agent_task(agent_id, enqueue_context=None):
 
         # 2. Make the POST request to the MCP with the agent's text and purposes
         if not send_msg(agent_id, agent, c, con, run_id=run_id):
+            span.set_status(Status(StatusCode.ERROR, "MCP chat request failed"))
             agent_jobs_total.labels(status="failed").inc()
             agent_job_duration.observe((time.time() - task_start_time) * 1000)
             con.close()
