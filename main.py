@@ -431,8 +431,8 @@ def send_msg(agent_id, agent, c, con, pretext="", run_id=None):
         "session_id": agent_id,
     }
 
-    if agent[8]:  # agent uses a custom llm model
-        data["model"] = agent[8]
+    if agent[7]:  # agent uses a custom llm model
+        data["model"] = agent[7]
 
     c.execute("INSERT INTO history (agent_id, timestamp, type, message) VALUES (?, ?, ?, ?)", (agent_id, int(time.time()), "incoming", pretext + agent[3]))
     con.commit()
