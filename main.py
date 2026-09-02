@@ -426,9 +426,16 @@ def agent_task(agent_id, enqueue_context=None):
 def send_msg(agent_id, agent, c, con, pretext="", run_id=None):
     purposes = json.loads(agent[4])
     data = {
-        "message": pretext + agent[3],
+        "message": (
+            "Execution rule for this MQTT-triggered task: use only the tools required "
+            "by the task. The agent is already subscribed, so do not call subscribe. "
+            "After a successful publish, do not call any further tools.\n\n"
+            + pretext
+            + agent[3]
+        ),
         "purposes": purposes,
         "session_id": agent_id,
+        "stop_after_publish": True,
     }
 
     if agent[7]:  # agent uses a custom llm model
